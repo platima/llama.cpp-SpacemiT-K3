@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import Callable, Iterable, TYPE_CHECKING, Sequence
 
 import torch
 
@@ -805,7 +805,6 @@ class Gemma4AssistantModel(Gemma4Model):
         self.gguf_writer.add_nextn_predict_layers(self.block_count)
 
 
-
 @ModelBase.register("Gemma4ForConditionalGeneration")
 class Gemma4VisionAudioModel(MmprojModel):
     has_audio_encoder = True
@@ -880,3 +879,61 @@ class Gemma4VisionAudioModel(MmprojModel):
                 data_torch = data_torch.permute(0, 3, 1, 2).contiguous()
             mapped_name = self.map_tensor_name(name, (".weight", ".bias", ".input_max", ".input_min", ".output_max", ".output_min"))
             yield (mapped_name, data_torch)
+
+
+@ModelBase.register("Gemma4UnifiedForConditionalGeneration")
+class Gemma4UnifiedVisionAudioModel(Gemma4VisionAudioModel):
+    has_audio_encoder = True
+    has_vision_encoder = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert self.hparams_vision is not None
+        assert self.hparams_audio is not None
+        text_embd_dim = self.hparams_vision["mm_embed_dim"]
+        self.hparams_vision["hidden_size"] = text_embd_dim
+        self.hparams_audio["hidden_size"] = text_embd_dim
+        # this is a transformer-less vision tower, the params below are redundant but set to avoid error
+        self.hparams_vision["intermediate_size"] = 0
+        self.hparams_vision["num_layers"] = 0
+        self.hparams_vision["num_attention_heads"] = 0
+        self.hparams_audio["intermediate_size"] = 0
+        self.hparams_audio["num_layers"] = 0
+        self.hparams_audio["num_attention_heads"] = 0
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_clip_vision_projector_type(gguf.VisionProjectorType.GEMMA4UV)
+        self.gguf_writer.add_clip_audio_projector_type(gguf.VisionProjectorType.GEMMA4UA)
+
+    def modify_tensors(self, data_torch, name, bid):
+        if name.endswith("pos_embedding"):
+            name += ".weight"
+            data_torch = data_torch.permute(1, 0, 2)
+        elif ".pos_norm." in name:
+            # rename to patch_ln3 to reuse the tensor name scheme
+            name = name.replace(".pos_norm.", ".patch_ln3.")
+        elif "patch_dense.weight" in name:
+            # ggml im2col outputs in RR..GG..BB.. (CHW) order, but weight expects RGBRGB.. (HWC).
+            # Permute columns so column i aligns with CHW input position i.
+            assert self.hparams_vision is not None
+            p = self.hparams_vision["model_patch_size"]
+            i = torch.arange(p * p * 3)
+            ch  = i // (p * p)
+            row = (i % (p * p)) // p
+            col = i % p
+            # perm[i] = HWC column index for CHW position i
+            perm = row * p * 3 + col * 3 + ch
+            data_torch = data_torch[:, perm]
+        elif "patch_ln1.weight" in name or "patch_ln1.bias" in name:
+            # same permutation for patch_ln1 as patch_dense to align with CHW input order
+            assert self.hparams_vision is not None
+            p = self.hparams_vision["model_patch_size"]
+            i = torch.arange(p * p * 3)
+            ch  = i // (p * p)
+            row = (i % (p * p)) // p
+            col = i % p
+            # perm[i] = HWC index for CHW position i
+            perm = row * p * 3 + col * 3 + ch
+            data_torch = data_torch[perm]
+        return super().modify_tensors(data_torch, name, bid)
