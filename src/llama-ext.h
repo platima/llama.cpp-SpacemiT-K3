@@ -104,3 +104,17 @@ LLAMA_API float * llama_get_embeddings_pre_norm    (struct llama_context * ctx);
 
 // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
 LLAMA_API float * llama_get_embeddings_pre_norm_ith(struct llama_context * ctx, int32_t i);
+
+//
+// next-N predictor embeddings (Gemma4 MTP)
+//
+
+// Set whether the context outputs nextn (post-norm) embeddings for MTP drafter consumption
+// If masked == true,  output the embeddings only for the tokens with batch.logits != 0
+// If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
+
+LLAMA_API float * llama_get_embeddings_nextn    (struct llama_context * ctx);
+LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
+
+LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);

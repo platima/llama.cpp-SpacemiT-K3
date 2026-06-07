@@ -31,6 +31,8 @@ struct llama_cparams {
     bool embeddings;
     bool embeddings_pre_norm;        // also extract the hidden state before the final output norm
     bool embeddings_pre_norm_masked; // extract for only rows where batch.logits != 0
+    bool embeddings_nextn;           // also extract the post-output-norm hidden state for MTP drafters (Gemma4)
+    bool embeddings_nextn_masked;    // extract for only rows where batch.logits != 0
     bool causal_attn;
     bool offload_kqv;
     bool flash_attn;
@@ -49,4 +51,6 @@ struct llama_cparams {
 
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
+
+    llama_context * ctx_other;
 };

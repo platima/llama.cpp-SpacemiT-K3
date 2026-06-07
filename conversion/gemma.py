@@ -765,6 +765,37 @@ class Gemma4Model(Gemma3Model):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("Gemma4UnifiedForConditionalGeneration")
+class Gemma4UnifiedModel(Gemma4Model):
+    model_arch = gguf.MODEL_ARCH.GEMMA4
+
+    def _get_suppress_tokens(self) -> Sequence[int] | None:
+        gen_cfg_path = self.dir_model / "generation_config.json"
+        if gen_cfg_path.is_file():
+            with open(gen_cfg_path, encoding="utf-8") as f:
+                gen_cfg = json.load(f)
+                return gen_cfg.get("suppress_tokens")
+        return None
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        suppress_tokens = self._get_suppress_tokens()
+        if suppress_tokens is not None:
+            self.gguf_writer.add_suppress_tokens(suppress_tokens)
+
+
+@ModelBase.register("Gemma4AssistantForCausalLM", "Gemma4UnifiedAssistantForCausalLM")
+class Gemma4AssistantModel(Gemma4Model):
+    model_arch = gguf.MODEL_ARCH.GEMMA4_ASSISTANT
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_embedding_length_out(self.hparams["backbone_hidden_size"])
+        self.gguf_writer.add_nextn_predict_layers(self.block_count)
+
+
+
 @ModelBase.register("Gemma4ForConditionalGeneration")
 class Gemma4VisionAudioModel(MmprojModel):
     has_audio_encoder = True
