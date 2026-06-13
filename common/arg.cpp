@@ -1090,6 +1090,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &) {
             fprintf(stderr, "version: %d (%s)\n", llama_build_number(), llama_commit());
             fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
+            fprintf(stderr, "SpacemiT release: 0.1.3 (patch 1: Gemma4 MTP + E2B/E4B assistants)\n");
+            fprintf(stderr, "upstream llama.cpp base: 354ebac8c\n");
             exit(0);
         }
     ));
