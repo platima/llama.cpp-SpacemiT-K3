@@ -444,7 +444,48 @@ distribution). Patch 9 (MTP net-negative on E2B) is therefore a
 small-model-specific problem; if E2B is acceptable as a non-MTP-only
 target the patch 9 work could be deprioritised.
 
-## TCM sync-mem heap fallback
+### `--spec-draft-n-max` tuning sweep (DONE 2026-06-14, post-patch-9)
+
+P3-followup. Swept `--spec-draft-n-max ∈ {2, 3, 4}` across every MTP-capable
+arch on this fork. All runs `-t 8 --no-mmap -fa 1 --temp 0
+--no-spec-draft-backend-sampling -n 60` (Qwen: chat-template prompt; Gemma:
+raw "Write a short poem about a robot.").
+
+| Model     | n=2 tg  | n=3 tg  | n=4 tg  | non-MTP | winner | vs non-MTP |
+|-----------|---------|---------|---------|---------|--------|------------|
+| Qwen 4B   |  7.540  | **8.162** |  7.164  |  ~7.0  | **3**  | +16%       |
+| Qwen 9B   |  6.088  | **6.571** |  5.595  |  5.33  | **3**  | +23%       |
+| Gemma E2B |**13.406**| (skip)  | 11.837  | 12.54  | **2**  | +6.9% (flipped) |
+| Gemma E4B |  9.045  | **10.223**|  9.787  |  7.53  | **3**  | +36%       |
+| Gemma 12B | (skip)  | (skip)  | **11.32** |  2.48 | **4**  | +356%      |
+
+**Key finding**: the upstream default `params.speculative.draft.n_max = 3`
+(`common/common.h:303`, changed from 16 → 3 in `b7c91edac` upstream merge)
+is already correct for **3 of 5 archs**. Prior `bench.sh` and results-log
+rows passed `--spec-draft-n-max 4` everywhere, which was uniformly worse than
+the default on Qwen 4B/9B and Gemma E4B. **No code change required — just
+stop overriding the default unless the arch falls into the high/low edges.**
+
+- **Edges that should override:** Gemma E2B → `2` (flips MTP net-negative to
+  net-positive vs non-MTP baseline). Gemma 12B → `4` (96% accept rate means
+  longer drafts almost always commit; the lost cycle at `n_max=3` would shed
+  the +356% margin).
+- **Why low-accept archs prefer `n_max=2`:** when accept rate <~30%, the
+  marginal token at draft step `k>2` is rarely committed, so it's pure
+  per-draft graph cost with no payoff. Shortening the draft horizon recovers
+  that cost.
+- **Why mid-accept archs prefer `n_max=3`:** sweet spot. Long enough that
+  the expected `1 + n_max·p_accept` accepted-per-cycle dominates the fixed
+  per-cycle setup, short enough that marginal-step waste isn't yet a tax.
+- **Why 12B prefers `n_max=4` (and probably more):** at 96% accept, every
+  added draft step commits with probability 0.96; throughput is roughly
+  linear in `n_max` until the MTP graph itself becomes the bottleneck. A
+  follow-up sweep at `n_max ∈ {5,6,8}` on 12B would likely keep finding
+  wins — left as a follow-up because 12B is RAM-marginal on K3.
+
+Updates to bench.sh and follow-on rows: stop pinning `--spec-draft-n-max 4`
+by default. For new MTP rows, either omit the flag entirely (default = 3) or
+pick the per-arch override above.
 
 At startup `llama-cli` logs:
 
