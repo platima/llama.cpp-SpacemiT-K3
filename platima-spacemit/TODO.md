@@ -289,6 +289,59 @@ between iterations. Possible follow-ups (none scoped yet):
 3. **Backend sampling.** Re-enabling once the "more than one output per
    seq" issue is solved would skip ~94 ms of CPU sampler time per run.
 
+### Qwen 3.5 MTP chat-template + size-scaling test (DONE 2026-06-14)
+
+The Qwen 3.5 4B "MTP head trained but accept only ~45%" mystery was
+investigated against the model README. Two leads tested:
+
+1. **Chat template** (P1 — cheap test). Wrapped prompt in the Qwen3
+   chat format (`<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`)
+   and re-ran 4B MTP at temp=0. Output became coherent thinking-mode
+   text ("Thinking Process: 1. Analyze the Request..."). But accept
+   rate moved from 47.6% → 45.5% — **within run-to-run noise**.
+   Chat template fixes output quality but does NOT fix accept rate.
+   Sampling per README's thinking-mode recommendation (temp=1.0,
+   top_p=0.95, top_k=20, presence_penalty=1.5) dropped accept to 16.9%
+   as expected (sampling variance ≠ greedy match).
+
+2. **Size scaling** (sanity check against the Gemma pattern). Benched
+   Qwen 3.5 9B (Q3_K_S) MTP vs non-MTP:
+   - 9B non-MTP: 5.33 t/s
+   - 9B MTP: 3.90 t/s, accept 52.5% (42/80)
+   - **Δ = −27% — still NET-NEGATIVE at 9B**.
+
+   The accept rate climbs modestly with size (45%@4B → 52%@9B) but stays
+   in the 50% range. Compare Gemma: 15%@E2B → 24%@E4B → 96%@12B.
+
+**Key reframe**: Qwen MTP underperformance is NOT a small-model artifact
+(Gemma E4B at embd=2048 is already +30% net-positive; Qwen 9B at
+embd=3584 is still net-negative). The bottleneck is **Qwen-specific**,
+in the DeltaNet/GDN recurrent path. Upstream `e95dae18d` (Remove padding
+and multiple D2D copies for MTP, #24086) refactors `ggml_gated_delta_net`
+to remove a padding hack and consolidate multiple D2D copies into a
+single strided `ggml_cpy` — in exactly that path. The earlier upstream
+survey dismissed it as "Qwen-only and we only care about Gemma";
+correction: **Qwen is the problem case, so e95dae18d IS the right
+backport candidate for patch 9**. Promote it.
+
+### Next priorities (queued for after patch 9 backport)
+
+- **P2: Wire MTP into `llama-cli` and `llama-completion`** (scope item).
+  Both currently parse `--spec-type draft-mtp` and silently set
+  `cparams.n_rs_seq=4` (5× DeltaNet widening) without driving the spec
+  loop — a footgun (no error, ~5× slower, no MTP benefit). Mirror the
+  speculative-simple pattern post-patch 7. Reference impl is
+  `tools/server/server-context.cpp:1043-1083`. Estimated effort: half a
+  day to a day of careful work, mostly editing arg-parse + spec loop
+  insertion in both tools' main.
+- **P3: IME2 coverage audit on the MTP block**. The per-draft MTP graph
+  runtime is the second-biggest knob (after the D2D fix). Confirm
+  whether the MTP head's `eh_proj`, attn, ffn matmuls hit the A100 IME2
+  fast path or fall back to a slower kernel. Wire a counter or use
+  existing SpacemiT profiler hooks; one instrumented run per arch
+  (Qwen 4B, Gemma E2B) would be conclusive. If every op already hits
+  IME2 then patch 9's headroom is in algorithm, not kernel choice.
+
 ### Patch 5/6/7 follow-ups
 
 - **Gemma4 E2B regression test — DONE 2026-06-14.** Surfaced patch 7 (the
