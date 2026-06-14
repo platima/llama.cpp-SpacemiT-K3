@@ -363,13 +363,45 @@ resolved.
     antiprompts all interact with the sample site at line 718).
   - Prior memory note ("both silently set n_rs_seq=4") was wrong.
     Closed without patch; ship-state confirmed correct.
-- **P3: IME2 coverage audit on the MTP block**. The per-draft MTP graph
-  runtime is the second-biggest knob (after the D2D fix). Confirm
-  whether the MTP head's `eh_proj`, attn, ffn matmuls hit the A100 IME2
-  fast path or fall back to a slower kernel. Wire a counter or use
-  existing SpacemiT profiler hooks; one instrumented run per arch
-  (Qwen 4B, Gemma E2B) would be conclusive. If every op already hits
-  IME2 then patch 9's headroom is in algorithm, not kernel choice.
+- **P3: IME2 coverage audit on the MTP block — DONE 2026-06-14.**
+  Instrumented `ggml_backend_riscv64_spacemit_buffer_init_tensor`
+  (`ggml/src/ggml-cpu/spacemit/ime.cpp:1395-1416`) with an env-gated
+  per-tensor dispatch log. Set `GGML_SPACEMIT_DISPATCH_LOG=1` and lines
+  of the form `SPM_DISPATCH|<name>|<type>|<ne[0]>|<ne[1]>|<ime|rvv>`
+  emit to stderr at buffer init time (model load), one per tensor that
+  enters the SpacemiT buffer. Single short load per arch captures full
+  coverage data.
+
+  Findings:
+  - **Qwen 3.5 4B Q4_K_M (single-model MTP, layer 32 = MTP block)**:
+    209 tensors enter the SpacemiT buffer, 209 get IME repack traits
+    (100% IME-eligible, 0 RVV fallbacks). MTP block coverage:
+    - `blk.32.attn_q.weight` Q4_K [2560, 8192] → ime
+    - `blk.32.attn_k.weight` Q4_K [2560, 1024] → ime
+    - `blk.32.attn_v.weight` Q6_K [2560, 1024] → ime
+    - `blk.32.attn_output.weight` Q4_K [4096, 2560] → ime
+    - `blk.32.ffn_gate.weight` Q4_K [2560, 9216] → ime
+    - `blk.32.ffn_down.weight` Q6_K [9216, 2560] → ime
+    - `blk.32.ffn_up.weight` Q4_K [2560, 9216] → ime
+    - `blk.32.nextn.eh_proj.weight` Q8_0 [5120, 2560] → ime
+    - Shared LM head: tied with `token_embd` Q6_K [2560, 248320] → ime
+  - **Gemma 4 E2B Q4_K_XL + `mtp-gemma-4-E2B-it.gguf` drafter**:
+    300 tensors total (277 target + 23 drafter), 100% IME-eligible.
+    Drafter MTP-specific weights:
+    - `nextn.pre_projection.weight` Q4_0 [3072, 256] → ime
+    - `nextn.post_projection.weight` Q4_0 [256, 1536] → ime
+
+  **Conclusion**: every MTP matmul on both archs hits the IME2 path
+  already. The earlier conditional ("if every op already hits IME2 then
+  patch 9's headroom is in algorithm, not kernel choice") is now
+  confirmed. Further per-draft graph speed has to come from
+  algorithmic changes — fewer ops per draft (fuse eh_proj + hnorm?),
+  larger draft batches amortising fixed overhead, or reducing the
+  number of recurrent-state slots we feed through `ggml_cpy`. There is
+  no IME dispatch headroom to chase.
+
+  Instrumentation kept in-tree as a debug aid (env-gated, no
+  overhead when unset).
 
 ### Patch 5/6/7 follow-ups
 

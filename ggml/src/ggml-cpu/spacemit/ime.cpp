@@ -27,6 +27,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>  // for GGML_ASSERT
+#include <cstdlib>  // for getenv (GGML_SPACEMIT_DISPATCH_LOG)
 #include <stdexcept>
 #include <thread>
 // clang-format off
@@ -1394,8 +1395,22 @@ static const ggml::cpu::tensor_traits * ggml_riscv64_spacemit_get_optimal_repack
 
 static enum ggml_status ggml_backend_riscv64_spacemit_buffer_init_tensor(ggml_backend_buffer_t buffer,
                                                                          ggml_tensor *         tensor) {
-    tensor->extra =
-        (void *) const_cast<ggml::cpu::tensor_traits *>(ggml_riscv64_spacemit_get_optimal_repack_type(tensor));
+    const auto * traits = ggml_riscv64_spacemit_get_optimal_repack_type(tensor);
+    tensor->extra = (void *) const_cast<ggml::cpu::tensor_traits *>(traits);
+
+    // Audit hook: set GGML_SPACEMIT_DISPATCH_LOG=1 to print one line per tensor
+    // showing whether it got an IME repack traits attached. Lines go to stderr in
+    // a stable pipe-delimited format so callers can grep/awk by tensor name
+    // (e.g. `blk.NN.nextn.eh_proj.weight`). Used for the patch 9 follow-up
+    // IME2 coverage audit on the MTP block.
+    if (std::getenv("GGML_SPACEMIT_DISPATCH_LOG")) {
+        fprintf(stderr, "SPM_DISPATCH|%s|%s|%lld|%lld|%s\n",
+                tensor->name,
+                ggml_type_name(tensor->type),
+                (long long) tensor->ne[0],
+                (long long) tensor->ne[1],
+                traits ? "ime" : "rvv");
+    }
 
     GGML_UNUSED(buffer);
 
