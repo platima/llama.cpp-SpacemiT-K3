@@ -1091,6 +1091,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             fprintf(stderr, "version: %d (%s)\n", llama_build_number(), llama_commit());
             fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
             fprintf(stderr, "SpacemiT release: 0.1.3 (patch 1: Gemma4 MTP + E2B/E4B assistants)\n");
+            fprintf(stderr, "                       (patch 2: speculative-simple MTP-on-target, avoid 2x model load)\n");
+            fprintf(stderr, "                       (patch 3: investigation - confirmed Qwen3.5 MTP tap mismatch in common/speculative.cpp)\n");
+            fprintf(stderr, "                       (patch 4: arch-aware MTP tap dispatch - pre_norm for Qwen3.5, nextn for Gemma4)\n");
+            fprintf(stderr, "                       (patch 5: expose post-output-norm tap in Qwen3.5/MoE - matches upstream 166fe2949)\n");
+            fprintf(stderr, "                       (patch 6a: counter-gated L2-magnitude probes in common_speculative_impl_draft_mtp)\n");
+            fprintf(stderr, "                       (patch 6b: speculative-simple calls common_speculative_process - fixes zero-vector h input to MTP)\n");
+            fprintf(stderr, "                       (patch 6c: speculative-simple warms up pending_h with h(id_last) - non-zero MTP input on iter 1)\n");
             fprintf(stderr, "upstream llama.cpp base: 354ebac8c\n");
             exit(0);
         }
