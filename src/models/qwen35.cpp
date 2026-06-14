@@ -211,12 +211,23 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "h_pre_norm", -1);
     res->t_h_pre_norm = cur;
 
-    if (!cparams.embeddings_pre_norm_masked && inp_out_ids) {
-        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
-    }
+    if (cparams.embeddings_nextn) {
+        // MTP drafter requested: compute output_norm BEFORE the row reduction so
+        // t_h_nextn captures the full-batch post-output-norm hidden state (the
+        // tap the trained Qwen3.5 MTP head expects, matching upstream 166fe2949).
+        cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+        cb(cur, "h_nextn", -1);
+        res->t_h_nextn = cur;
 
-    // Final norm
-    cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+        if ((!cparams.embeddings_pre_norm_masked || !cparams.embeddings_nextn_masked) && inp_out_ids) {
+            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+        }
+    } else {
+        if (!cparams.embeddings_pre_norm_masked && inp_out_ids) {
+            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+        }
+        cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+    }
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
@@ -637,6 +648,11 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     GGML_ASSERT(head_norm_w && "QWEN35 MTP: missing both nextn.shared_head_norm and output_norm");
     cur = build_norm(cur, head_norm_w, nullptr, LLM_NORM_RMS, -1);
     cb(cur, "mtp_shared_head_norm", -1);
+
+    // Post-output-norm hidden state for subsequent draft iterations to consume
+    // (matches the trunk graph's t_h_nextn semantics added in patch 5).
+    cb(cur, "h_nextn", -1);
+    res->t_h_nextn = cur;
 
     ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;

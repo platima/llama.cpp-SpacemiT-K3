@@ -117,4 +117,12 @@ LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value
 LLAMA_API float * llama_get_embeddings_nextn    (struct llama_context * ctx);
 LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
 
+// Per-arch MTP hidden-state tap selector.
+// Returns true if the model's MTP graph populates the post-output-norm tap
+// (consumed via llama_get_embeddings_nextn*), false if it populates the
+// pre-output-norm tap (consumed via llama_get_embeddings_pre_norm*).
+// Used by common_speculative_impl_draft_mtp to dispatch the correct
+// set/get API per target arch.
+LLAMA_API bool llama_model_mtp_uses_nextn(const struct llama_model * model);
+
 LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);

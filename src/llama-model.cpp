@@ -2253,6 +2253,22 @@ int32_t llama_model_n_embd_out(const llama_model * model) {
     return model->hparams.n_embd_out();
 }
 
+bool llama_model_mtp_uses_nextn(const llama_model * model) {
+    switch (model->arch) {
+        case LLM_ARCH_GEMMA4:
+        case LLM_ARCH_GEMMA4_ASSISTANT:
+            return true;
+        case LLM_ARCH_QWEN35:
+        case LLM_ARCH_QWEN35MOE:
+            // Patch 5 exposes a post-output-norm tap via t_h_nextn in both the
+            // trunk and MTP graphs, matching upstream 166fe2949. The trained
+            // Qwen3.5 MTP head expects this post-norm tap, not pre_norm.
+            return true;
+        default:
+            return true;
+    }
+}
+
 int32_t llama_model_n_layer(const llama_model * model) {
     return model->hparams.n_layer;
 }
