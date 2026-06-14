@@ -65,6 +65,17 @@ Tracking items deferred from the Gemma4 MTP cherry-pick work.
   L2≈153.79 (was 0.0). Perf is within run-to-run noise of patch 6b
   (one recovered cycle out of ~22 over a 60-token run), but correctness
   is restored end-to-end.
+- **patch 9**: Backport of upstream `e95dae18d (Remove padding and multiple
+  D2D copies for MTP, #24086)`. Refactors `ggml_gated_delta_net`:
+  state tensor now 4D `[S_v, S_v, H, n_seqs]` (was `(S_v*S_v*H, K, n_seqs)`
+  with a padding hack); K (snapshot slot count) is now an op param;
+  multi-snapshot per-slot `ggml_cpy` loop in `build_recurrent_attn`
+  collapsed to a single strided copy. Hexagon-side conflict resolved
+  by taking upstream verbatim (Hexagon backend not built on SpacemiT K3).
+  Result on Qwen 3.5: 4B tg 4.67 → 7.16 t/s (+53%), 9B Q3_K_S tg 3.90 →
+  5.60 t/s (+43%). MTP is now NET-POSITIVE on both Qwen sizes (was
+  net-negative even at 9B before). Gemma E2B sanity check: no change
+  (Gemma doesn't use DeltaNet). Single-commit cherry-pick of `c9a10c1d8`.
 - **patch 7**: Gemma 4 regression fix in `examples/speculative-simple`.
   Patch 2's MTP-on-target branch set `cparams.ctx_other = ctx_tgt` and
   `cparams.n_rs_seq = 0` on the new MTP draft context, but the *other*
@@ -325,6 +336,10 @@ correction: **Qwen is the problem case, so e95dae18d IS the right
 backport candidate for patch 9**. Promote it.
 
 ### Next priorities (queued for after patch 9 backport)
+
+**Patch 9 shipped 2026-06-14** (commit `c9a10c1d8`). Qwen 4B MTP +53% tg,
+9B +43% tg; both archs now MTP-positive. The "Qwen-specific MTP gap" is
+resolved.
 
 - **P2: Wire MTP into `llama-cli` and `llama-completion`** (scope item).
   Both currently parse `--spec-type draft-mtp` and silently set

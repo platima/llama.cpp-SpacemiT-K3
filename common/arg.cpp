@@ -1099,6 +1099,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             fprintf(stderr, "                       (patch 6b: speculative-simple calls common_speculative_process - fixes zero-vector h input to MTP)\n");
             fprintf(stderr, "                       (patch 6c: speculative-simple warms up pending_h with h(id_last) - non-zero MTP input on iter 1)\n");
             fprintf(stderr, "                       (patch 7: speculative-simple sets ctx_other/n_rs_seq in --model-draft MTP path - fixes Gemma4 Assistant)\n");
+            fprintf(stderr, "                       (patch 9: backport upstream e95dae18d - remove padding and multiple D2D copies in ggml_gated_delta_net for Qwen3.5 MTP, +43-53%% tg)\n");
             fprintf(stderr, "upstream llama.cpp base: 354ebac8c\n");
             exit(0);
         }
