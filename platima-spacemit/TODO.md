@@ -65,6 +65,20 @@ Tracking items deferred from the Gemma4 MTP cherry-pick work.
   L2≈153.79 (was 0.0). Perf is within run-to-run noise of patch 6b
   (one recovered cycle out of ~22 over a 60-token run), but correctness
   is restored end-to-end.
+- **patch 7**: Gemma 4 regression fix in `examples/speculative-simple`.
+  Patch 2's MTP-on-target branch set `cparams.ctx_other = ctx_tgt` and
+  `cparams.n_rs_seq = 0` on the new MTP draft context, but the *other*
+  branch (when `--model-draft` points at a separately-loaded MTP gguf —
+  the Gemma 4 Assistant case) only set `cparams.ctx_type` and skipped the
+  other two. Gemma4Assistant's init throws "requires ctx_other to be set"
+  in that path, so every Gemma 4 MTP run with `--model-draft` died at
+  context creation. Mirrors the server pattern at
+  `tools/server/server-context.cpp:1043-1061`. Verified end-to-end on
+  Gemma 4 E2B (unsloth UD-Q4_K_XL + mtp-gemma-4-E2B-it.gguf): runs
+  cleanly, accept = 15% (21/140), tg 11.85 t/s vs 12.54 non-MTP baseline.
+  Confirms patches 4/5/6 did not regress the Gemma path — but slightly
+  net-negative for MTP on E2B (per-draft graph cost dominates on the
+  smaller 1536 embedding dimension).
 
 ## Scope (per user, 2026-06-14)
 
@@ -248,12 +262,18 @@ between iterations. Possible follow-ups (none scoped yet):
 3. **Backend sampling.** Re-enabling once the "more than one output per
    seq" issue is solved would skip ~94 ms of CPU sampler time per run.
 
-### Patch 5/6 follow-ups (deferred)
+### Patch 5/6/7 follow-ups
 
-- **Gemma4 E2B/E4B regression test** — confirm Gemma4 drafters still see
-  the same accept rate they did before patches 4/5/6. The patch 6b fix
-  also benefits Gemma4 (now its `process()` actually runs); expected to
-  be a net positive but should be confirmed.
+- **Gemma4 E2B regression test — DONE 2026-06-14.** Surfaced patch 7 (the
+  Gemma path was crashing at init, not silently regressing). With patch 7
+  applied: tg 11.85 t/s, accept 15%, coherent output. Net slightly below
+  the 12.54 t/s non-MTP baseline; the gap is per-draft MTP graph cost on
+  E2B's 1536 embedding dim. Patches 4/5/6 themselves did not regress
+  Gemma's accept rate (patch 4's dispatch routes Gemma to nextn just as
+  the pre-patch code did unconditionally).
+- **Gemma4 E4B regression test** — still outstanding. Should mirror E2B
+  but on the larger model; useful to confirm patch 7 holds on the
+  recommended `mtp-gemma-4-E4B-it.gguf` from `instructions.md`.
 
 ## TCM sync-mem heap fallback
 

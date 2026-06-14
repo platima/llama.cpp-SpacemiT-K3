@@ -106,7 +106,9 @@ int main(int argc, char ** argv) {
 
         auto cparams = common_context_params_to_llama(params_dft);
         if (spec_mtp) {
-            cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+            cparams.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
+            cparams.n_rs_seq  = 0;
+            cparams.ctx_other = ctx_tgt;
         }
         ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
 
