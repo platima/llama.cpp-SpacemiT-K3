@@ -49,8 +49,38 @@ int main(int argc, char ** argv) {
     llama_model_ptr model_dft;
     llama_context_ptr ctx_dft;
 
-    // TODO: simplify this logic
-    {
+    const bool spec_mtp = std::find(params.speculative.types.begin(),
+                                    params.speculative.types.end(),
+                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+
+    // MTP draft head lives on the target model (see tools/server/server-context.cpp:1062-1083).
+    // When --spec-type draft-mtp is the only spec type and either no --model-draft was
+    // given or it points at the same file as the target, reuse the target model and only
+    // allocate a new context. Loading a second copy of the same weights would double host
+    // memory and silently break on memory-tight devices (K3: 16 GB total).
+    const bool mtp_on_target =
+        spec_mtp && (!params.speculative.has_dft() ||
+                     params.speculative.draft.mparams.path == params.model.path);
+
+    if (mtp_on_target) {
+        LOG_INF("creating MTP draft context against the target model '%s'\n", params.model.path.c_str());
+
+        auto cparams_mtp         = common_context_params_to_llama(params);
+        cparams_mtp.ctx_type     = LLAMA_CONTEXT_TYPE_MTP;
+        cparams_mtp.type_k       = params.speculative.draft.cache_type_k;
+        cparams_mtp.type_v       = params.speculative.draft.cache_type_v;
+        cparams_mtp.n_rs_seq     = 0;
+        cparams_mtp.ctx_other    = ctx_tgt;
+
+        ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));
+        if (ctx_dft == nullptr) {
+            LOG_ERR("%s", "failed to create MTP context against target model\n");
+            return 1;
+        }
+
+        params.speculative.draft.ctx_tgt = ctx_tgt;
+        params.speculative.draft.ctx_dft = ctx_dft.get();
+    } else {
         const auto & params_spec = params.speculative.draft;
 
         auto params_dft = params;
@@ -75,6 +105,9 @@ int main(int argc, char ** argv) {
         }
 
         auto cparams = common_context_params_to_llama(params_dft);
+        if (spec_mtp) {
+            cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+        }
         ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
 
         params.speculative.draft.ctx_tgt = ctx_tgt;
@@ -150,6 +183,31 @@ int main(int argc, char ** argv) {
     common_speculative_begin(spec, seq_id, prompt_tgt);
 
     llama_batch batch_tgt = llama_batch_init(llama_n_batch(ctx_tgt), 0, 1);
+
+    // Patch 6c: warm up pending_h with h(id_last) so iter 1's draft() has a
+    // non-zero MTP input. Without this, the first draft cycle feeds a zero
+    // vector to the MTP head (smoking gun from patch 6a probes) and wastes
+    // a draft cycle. Decode id_last on ctx_tgt at n_past, drive process() to
+    // capture h(id_last) into pending_h (process() also writes id_last into
+    // ctx_dft KV), then roll back both KV caches so iter 1 can decode
+    // id_last cleanly at the same n_past.
+    {
+        llama_batch warmup = llama_batch_init(1, 0, 1);
+        common_batch_add(warmup, id_last, n_past, { seq_id }, true);
+        if (llama_decode(ctx_tgt, warmup) != 0) {
+            LOG_ERR("%s: warmup target decode failed\n", __func__);
+            llama_batch_free(warmup);
+            return 1;
+        }
+        if (!common_speculative_process(spec, warmup)) {
+            LOG_ERR("%s: warmup process failed\n", __func__);
+            llama_batch_free(warmup);
+            return 1;
+        }
+        llama_memory_seq_rm(llama_get_memory(ctx_tgt),       seq_id, n_past, -1);
+        llama_memory_seq_rm(llama_get_memory(ctx_dft.get()), seq_id, n_past, -1);
+        llama_batch_free(warmup);
+    }
 
     size_t n_draft = 0;
 
@@ -227,10 +285,15 @@ int main(int argc, char ** argv) {
             llama_decode(ctx_tgt, batch_tgt);
         }
 
-        // evaluate the same batch with the draft model
-        {
-            // TODO: extend to support MTP, Eagle, etc. See server code for reference
-            llama_decode(ctx_dft.get(), batch_tgt);
+        // Drive the speculative impl's process() hook on the target batch.
+        // For draft-model spec this is equivalent to llama_decode(ctx_dft, batch).
+        // For MTP this is essential: process() captures the target's hidden state
+        // (the tap selected by patch 4/5) into the impl's pending_h, which feeds
+        // the next draft() iteration. Without this, MTP runs with a zero-vector
+        // hidden-state input (smoking gun seen on patch 6a probe).
+        if (!common_speculative_process(spec, batch_tgt)) {
+            LOG_ERR("failed to process speculative batch\n");
+            break;
         }
 
         // only save the sampler sampler state if we use checkpoints
