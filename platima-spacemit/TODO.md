@@ -271,9 +271,37 @@ between iterations. Possible follow-ups (none scoped yet):
   E2B's 1536 embedding dim. Patches 4/5/6 themselves did not regress
   Gemma's accept rate (patch 4's dispatch routes Gemma to nextn just as
   the pre-patch code did unconditionally).
-- **Gemma4 E4B regression test** — still outstanding. Should mirror E2B
-  but on the larger model; useful to confirm patch 7 holds on the
-  recommended `mtp-gemma-4-E4B-it.gguf` from `instructions.md`.
+- **Gemma4 E4B regression test — DONE 2026-06-14 (patch 8 in user
+  nomenclature).** With patch 7 applied: tg 9.787 t/s vs 7.53 t/s non-MTP
+  baseline = **+30% net win**. accept 24.2% (30/124), coherent output.
+  E4B's 2048 embedding dim is large enough that per-token decode cost
+  outweighs per-draft MTP graph cost — crosses the win/loss threshold
+  E2B (embd=1536) sits just below. Confirms patch 7 holds end-to-end on
+  the recommended `mtp-gemma-4-E4B-it.gguf`.
+- **Gemma4 12B opportunistic bench — DONE 2026-06-14.** Same patch-7
+  binary on `unsloth-gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf`
+  with `mtp-gemma-4-12B-it.gguf` drafter: tg 11.32 t/s vs 2.48 t/s
+  non-MTP = **+356% (4.5× speedup)**, accept 96.2% (50/52). Caveat: raw
+  prompt with `-no-cnv` produces garbage `"1.\n1.\n1."` repeating output
+  on the 12B Qat (worked on E2B/E4B with same flags) — 12B likely needs
+  chat-template wrapping. Speed comparison still valid since same garbage
+  appears with or without MTP.
+
+### Size-dependent MTP win threshold (Gemma 4, patch 7 build, 2026-06-14)
+
+| Model | embd dim | non-MTP tg | MTP tg | Δ        | accept |
+|-------|----------|------------|--------|----------|--------|
+| E2B   | 1536     | 12.54 t/s  | 11.85  | **−5.5%** | 15.0%  |
+| E4B   | 2048     |  7.53 t/s  |  9.79  | **+30%**  | 24.2%  |
+| 12B   | 3840     |  2.48 t/s  | 11.32  | **+356%** | 96.2%  |
+
+Crossover sits between E2B and E4B. Two compounding effects: (a) larger
+embedding makes each non-MTP decode slower in absolute terms (denominator
+grows), and (b) accept rate climbs sharply with model capacity (likely
+because the MTP head was trained as a function of the larger trunk's
+distribution). Patch 9 (MTP net-negative on E2B) is therefore a
+small-model-specific problem; if E2B is acceptable as a non-MTP-only
+target the patch 9 work could be deprioritised.
 
 ## TCM sync-mem heap fallback
 
