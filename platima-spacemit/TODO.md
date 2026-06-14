@@ -246,6 +246,33 @@ Probe confirms first-iter `draft/input-to-mtp L2=153.79`. The perf
 delta is in run-to-run noise (one extra useful draft cycle over ~22),
 but the path is now correct on cycle 1 too.
 
+### Upstream survey for MTP perf fixes (2026-06-14)
+
+Scanned `ggml-org/llama.cpp` commits from base `354ebac8c` to `upstream/master`
+(160 commits ahead) for anything that might obviate the planned patch 9
+(MTP net-negative on small models). Touched paths surveyed: `common/speculative.cpp`,
+`src/models/qwen35*.cpp`, `src/models/gemma4*.cpp`, `examples/speculative-simple/`,
+`tools/server/server-context.cpp`, `src/llama-context.cpp`, `src/llama-graph.cpp`.
+
+| Upstream commit | What it does | Relevance to patch 9 |
+|-----------------|--------------|----------------------|
+| `e95dae18d` Remove padding and multiple D2D copies for MTP (#24086) | Refactors `ggml_gated_delta_net` to take only initial state (D,1,n_seqs); K passed as op param. Removes a padding hack + multi-copy D2D pattern in favour of a single strided `ggml_cpy`. | **Qwen3.5 only** — the GDN op is the Qwen3.5 DeltaNet recurrent path, not used by Gemma4 (plain transformer). Does not address the Gemma E2B net-negative case. Could be a small win for Qwen3.5 MTP runtime if backported, but the API change is invasive (touches all 9 backends + delta-net-base.cpp). Defer. |
+| `a66d50588` graph: guard iswa kq_mask on its own buffer (#24294) | Defensive null-buffer guard for SWA-only draft heads (StepFun MTP specifically). | Not applicable — Gemma4 SWA isn't a "draft-only" head in our setup. |
+| `88a39274e` spec: add EAGLE3 (#18039) | New speculative impl alongside MTP. Adds `common_speculative_impl_draft_eagle3` but does NOT modify `common_speculative_impl_draft_mtp`. | No MTP perf change. Large/intrusive backport if we ever want EAGLE3, but unrelated to E2B's gap. |
+| `260862b8c` arg: fix double mtp downloads (#24128) | Skip mtp/mmproj auto-discovery for sub-models (draft/mmproj/vocoder). | Arg-parse hygiene, not perf. Probably worth applying anyway. |
+| `7acb4e8cd` hparams: refactor `hparams.n_layer` (#24060) | `n_layer` → `n_layer()`, `swa_layers` → `is_swa_impl`, `n_layer_kv_from_start` reads from `n_layer_all`. | Pure refactor. Would conflict with our patches if/when we rebase. |
+
+**Conclusion**: there is no upstream commit that addresses the Gemma E2B
+MTP net-negative case directly. The only MTP-tagged perf commit
+(`e95dae18d`) targets DeltaNet, which only Qwen3.5 uses. The E2B gap is
+genuinely per-draft transformer-block runtime on a 1536-dim embedding,
+which the existing three follow-ups (IME2 coverage, `n_max` tuning,
+backend sampling re-enablement) are still the right framing for. Patch 9
+would need to be original investigation work, not a cherry-pick. Given
+that E4B (+30%) and 12B (+356%) are already net-positive on the same
+binary, patch 9 may be deprioritisable depending on whether E2B has to
+be MTP-positive specifically.
+
 ### Remaining gap to non-MTP baseline (7 t/s)
 
 At 4.72 t/s the MTP path is still ~33% slower than non-MTP. With 47.6%
