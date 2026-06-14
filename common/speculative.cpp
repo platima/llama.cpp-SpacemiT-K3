@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -421,6 +422,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     bool is_mem_shared = false;
 
+    // Per-arch tap selector: true → post-output-norm tap (Gemma4 family),
+    // false → pre-output-norm tap (Qwen3.5 family). Set once at init from
+    // the target model's arch; used to dispatch set/get embedding APIs.
+    bool uses_nextn = true;
+
+    // Patch 6a: counter-gated L2-magnitude probe. Logs the L2 norm of the
+    // first few h_row reads at each site so we can sanity-check the tap
+    // against expected magnitudes (RMSNorm output: L2 ≈ sqrt(n_embd)).
+    // Auto-stops after `probe_budget` calls.
+    int probe_budget = 12;
+    void probe_l2(const char * where, const float * h) {
+        if (probe_budget <= 0 || h == nullptr) return;
+        double s = 0.0;
+        for (int k = 0; k < n_embd; ++k) {
+            s += (double) h[k] * (double) h[k];
+        }
+        const double l2 = std::sqrt(s);
+        LOG_INF("mtp-probe[%s]: L2=%.3f (expected ~%.3f for post-norm, n_embd=%d)\n",
+                where, l2, std::sqrt((double) n_embd), n_embd);
+        --probe_budget;
+    }
+
     // Per-sequence cross-batch carryover: pair (h_p, x_{p+1}) at MTP pos p+1.
     // The last h-row of one process() call needs the first token of the NEXT
     // call to pair with, so it's stashed here until that next call fires.
@@ -492,8 +515,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
         }
 
-        llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
-        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+        uses_nextn = llama_model_mtp_uses_nextn(llama_get_model(ctx_tgt));
+        LOG_INF("%s: - mtp tap: %s (target arch dictates)\n", __func__, uses_nextn ? "nextn (post-output-norm)" : "pre_norm");
+
+        if (uses_nextn) {
+            llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
+            llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+        } else {
+            llama_set_embeddings_pre_norm(ctx_tgt, true, /*masked*/ false);
+            llama_set_embeddings_pre_norm(ctx_dft, true, /*masked*/ true);
+        }
 
         is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt;
 
@@ -594,7 +625,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             //                                                       ^--- this is a problem
             // TODO:this is generally true, but would be nice to assert it
             {
-                const float * h_tgt = llama_get_embeddings_nextn(ctx_tgt);
+                const float * h_tgt = uses_nextn
+                    ? llama_get_embeddings_nextn(ctx_tgt)
+                    : llama_get_embeddings_pre_norm(ctx_tgt);
+                probe_l2("process/trunk-row0", h_tgt);
                 std::memcpy(batch.embd + (size_t) 1 * n_embd, h_tgt, row_bytes * (n_tokens-1));
             }
 
@@ -628,7 +662,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             verify_h[seq_id].resize((size_t) n_rows * n_embd);
 
             for (int32_t i = 0; i < n_rows; ++i) {
-                const float * h = llama_get_embeddings_nextn_ith(ctx_tgt, i_batch_beg[seq_id] + i);
+                const float * h = uses_nextn
+                    ? llama_get_embeddings_nextn_ith   (ctx_tgt, i_batch_beg[seq_id] + i)
+                    : llama_get_embeddings_pre_norm_ith(ctx_tgt, i_batch_beg[seq_id] + i);
+                if (i == 0) probe_l2("process/verify-row0", h);
                 std::memcpy(verify_h[seq_id].data() + (size_t) i * n_embd, h, row_bytes);
             }
 
@@ -665,6 +702,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             common_batch_add(batch, dp.id_last, dp.n_past, { seq_id }, true);
 
             h_row = pending_h[seq_id].data();
+            probe_l2("draft/input-to-mtp", h_row);
             std::memcpy(batch.embd + n_embd*(batch.n_tokens - 1), h_row, row_bytes);
         }
 
@@ -689,7 +727,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 auto * smpl = smpls[seq_id].get();
 
                 common_sampler_sample(smpl, ctx_dft, i_batch, true);
-                h_row = llama_get_embeddings_nextn_ith(ctx_dft, i_batch);
+                h_row = uses_nextn
+                    ? llama_get_embeddings_nextn_ith   (ctx_dft, i_batch)
+                    : llama_get_embeddings_pre_norm_ith(ctx_dft, i_batch);
+                probe_l2("draft/mtp-out", h_row);
                 ++i_batch;
 
                 const auto * cur_p = common_sampler_get_candidates(smpl, true);
