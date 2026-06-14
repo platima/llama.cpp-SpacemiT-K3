@@ -341,14 +341,28 @@ backport candidate for patch 9**. Promote it.
 9B +43% tg; both archs now MTP-positive. The "Qwen-specific MTP gap" is
 resolved.
 
-- **P2: Wire MTP into `llama-cli` and `llama-completion`** (scope item).
-  Both currently parse `--spec-type draft-mtp` and silently set
-  `cparams.n_rs_seq=4` (5× DeltaNet widening) without driving the spec
-  loop — a footgun (no error, ~5× slower, no MTP benefit). Mirror the
-  speculative-simple pattern post-patch 7. Reference impl is
-  `tools/server/server-context.cpp:1043-1083`. Estimated effort: half a
-  day to a day of careful work, mostly editing arg-parse + spec loop
-  insertion in both tools' main.
+- **P2: Wire MTP into `llama-cli` and `llama-completion`** —
+  **investigated 2026-06-14, no code change needed.** Findings:
+  - `llama-cli` (`tools/cli/cli.cpp`) is a thin client over
+    `server_context`; instantiates one and submits a task. The MTP
+    wiring in `tools/server/server-context.cpp:920-1083` (spec_mtp
+    detection → `ctx_type=LLAMA_CONTEXT_TYPE_MTP`, `n_rs_seq=0`,
+    `ctx_other=ctx_tgt`) is inherited automatically. Already MTP-aware.
+  - `llama-completion` (`tools/completion/completion.cpp`) has no spec
+    hook in its main loop, but isn't a footgun: the `--spec-type` arg
+    is `.set_examples({SPECULATIVE, SERVER, CLI})` at
+    `common/arg.cpp:3672`, so it's filtered out at registration for
+    `LLAMA_EXAMPLE_COMPLETION` (filter at `arg.cpp:1075`). Both the
+    CLI-flag path and the `LLAMA_ARG_SPEC_TYPE` env-var path skip it
+    (env loop at `arg.cpp:500` only iterates registered options). A
+    user running `llama-completion --spec-type draft-mtp` gets
+    `error: invalid argument: --spec-type` before model load — no
+    silent `n_rs_seq` widening. If completion ever does need MTP,
+    port the spec loop from `speculative-simple` proper (substantial
+    refactor: interactive, ga_n, session cache, conversation,
+    antiprompts all interact with the sample site at line 718).
+  - Prior memory note ("both silently set n_rs_seq=4") was wrong.
+    Closed without patch; ship-state confirmed correct.
 - **P3: IME2 coverage audit on the MTP block**. The per-draft MTP graph
   runtime is the second-biggest knob (after the D2D fix). Confirm
   whether the MTP head's `eh_proj`, attn, ffn matmuls hit the A100 IME2
