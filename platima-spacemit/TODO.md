@@ -813,93 +813,76 @@ GGML_OP_TIMING=1 llama-speculative-simple ...  2>&1 | grep -A100 GGML_OP_TIMING
 GGML_OP_TIMING=1 GGML_OP_TIMING_ALL=1 ...      # record every named tensor (large)
 ```
 
-## Patch 15 (queued, 2026-06-15) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
+## Patch 15 (DEFERRED 2026-06-15) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
 
-Refactor patch, no perf delta expected. The win is rebase cost on the
-eventual personal-fork migration (`github.com/platima/llama.cpp-spacemit`).
+Closed without implementation. Scope conflicts with preserving the
+parallel pre_norm / nextn tap infrastructure for upcoming features and
+external consumers of this fork.
 
-The patch-1 cherry-pick resolution kept *both* hidden-state output
-buffers in `llama_context`:
-  - `embd_pre_norm` (sized `n_embd`) — Qwen 3.5 tap
-  - `embd_nextn`    (sized `n_embd_out`) — Gemma 4 tap
+Investigation surfaced that `llama_model_mtp_uses_nextn` currently
+returns `true` for every arch (including `default:`), which means the
+`embd_pre_norm` buffer, `cparams.embeddings_pre_norm{,_masked}` flags,
+`llama_set_embeddings_pre_norm` setter, `get_embeddings_pre_norm{,_ith}`
+getters, `t_h_pre_norm` plumbing, `common_speculative_need_embd_pre_norm`
+wrapper, and the server-context `need_embd_pre_norm()` hook are all
+reachable only behind a switch that never flips at runtime today.
 
-with parallel `cparams.embeddings_pre_norm{,_masked}` /
-`cparams.embeddings_nextn{,_masked}` flags, parallel
-`set_embeddings_pre_norm` / `set_embeddings_nextn` setters, parallel
-`get_embeddings_pre_norm{,_ith}` / `get_embeddings_nextn{,_ith}` getters,
-parallel buffer allocation + reorder code in `output_reserve` /
-`output_reorder`, and parallel extraction blocks in `encode` / `decode`.
-There is no functional reason for them to be two parallel features —
-they're the same "hidden state for the MTP drafter" with a different
-tap point per architecture.
+Two refactor variants were considered:
+  1. Unify both taps into a single `embd_drafter_h` buffer + single
+     setter/getter pair (original TODO plan, ~150–300 LOC across 7
+     files).
+  2. Delete the pre_norm tap as dead code (smaller, subtractive).
 
-Additionally, the fork-only Qwen3.5 MTP wiring `mtp_on_hybrid_qwen35`
-in `src/llama-model.cpp` lives at the same touchpoint (it's the
-fork-side counterpart to the upstream Gemma 4 MTP graph build). The
-two should be refactored together since both express "this arch's
-hidden-state tap differs from the default" — folding them into the
-same dispatch reduces the surface area for rebase conflicts.
+Both were rejected: the parallel `_pre_norm` / `_nextn` plumbing is
+scaffolding for upcoming MTP arches that will tap pre-output-norm and
+for other consumers of this fork that may already rely on the C API
+pair. Collapsing or deleting it forces those callers to re-plumb the
+seam later, which is the opposite of what a refactor patch should do.
 
-Plan:
-- Collapse to a single `embd_drafter_h` buffer and a single
-  `cparams.embeddings_drafter_h{,_masked}` flag pair.
-- The arch decides the tap point already (`llama_model_mtp_uses_nextn`,
-  from patch 4) — extend that to also tell `llama_context` whether to
-  size the buffer as `n_embd` or `n_embd_out`. Could use `n_embd_out`
-  universally and have Qwen 3.5's graph write into the first `n_embd`
-  rows.
-- Single `set_embeddings_drafter_h(ctx, value, masked)` C API
-  replacing the two existing setters; mark the old per-tap APIs
-  deprecated (keep them as thin wrappers for one release).
-- `common_speculative_impl_draft_mtp` collapses to one set/get call
-  pair regardless of arch — the dispatch lives in the model graph,
-  not the caller.
-- Inline `mtp_on_hybrid_qwen35` into the same arch-flag table that
-  `llama_model_mtp_uses_nextn` already drives. Goal: one place to
-  list every MTP arch and what it does, rather than two parallel
-  dispatch tables.
+The third sub-item — folding the local `const bool mtp_on_hybrid_qwen35`
+in `src/llama-model.cpp` into a per-arch `hparams` flag — was also
+dropped. It's used twice in one function, cosmetic-only, net-zero LOC,
+no perf or correctness payoff.
 
-Validation:
-- All four MTP archs from the patch-9 sweep table produce identical
-  accept rates and tg (within run-to-run noise) at their best n_max.
-- The §K3 improvements notes about "two parallel hidden-state output
-  buffers" and "mtp_on_hybrid_qwen35 fork-only" both disappear.
-- Reduces conflict surface for the eventual personal-fork rebase.
+Outcome: the parallel pre_norm/nextn plumbing stays in place. If a
+future arch flips `llama_model_mtp_uses_nextn` to `false`, the pre_norm
+path is ready without further work. Revisit only if a concrete consumer
+(internal or external) demonstrates that the dual API has a real cost.
 
-Risk: low if all four archs validate. The unifying abstraction is
-purely a code-organization change, not a behavior change.
+## Patch 16 (DISMISSED 2026-06-15) — X100 sampling threadpool, fails its own probe gate
 
-## Patch 16 (deferred, compile-flag — 2026-06-15) — X100 sampling threadpool
+Closed without implementation after a zero-code data dip into existing
+bench logs.
 
-Behind `GGML_CPU_RISCV64_SPACEMIT_X100=ON` (default OFF, per the
-existing compile-flag rule for any X100 work). Highest-upside X100
-candidate per the X100 utilization analysis (below this section).
+The patch entry's own pre-implementation gate was: probe shows ≥5%
+tg uplift from moving sampling off the main coordinator thread onto
+a 2-thread X100 pool. The hypothesis (~100 ms / ~5% upside) came from
+absolute sampler cost, never normalized against decode wall-clock.
 
-The CPU sampler currently runs on the unpinned main coordinator
-thread, which floats on the X100 cores anyway, but only uses one
-core. A 2-thread X100 pool dedicated to sampling could overlap
-with the A100 next-decode setup, recovering some of the ~94 ms
-sampler cost as parallel time rather than serial time.
+Data (results.log row 43, Gemma 12B MTP, n=60, --no-spec-draft-backend-sampling):
+- `sampling time = 166.98 ms (104.69 ms samplers)`
+- `total = 12197.90 ms`
+- → sampling = **1.37% of decode** (broad), **0.86% of decode** (sampler chain only)
 
-Plan (deferred — start with probe only):
-1. Probe-only patch: run `llama_sampler_sample` on a 2-thread X100
-   pool via `pthread_setaffinity_np` to cores {6, 7}.
-2. Measure end-to-end tg on Gemma 12B and Qwen 4B MTP.
-3. Commit to full sub-backend work ONLY if the probe shows >5% tg
-   uplift. If <5%, close as "X100 sampling probed, not worth the
-   pipelining complexity".
+That's already at or below the patch-10 1.4% noise floor — *before*
+subtracting any X100/A100 LPDDR contention overhead, scheduler
+overhead, or imperfect overlap with the next-decode setup window.
 
-Defer reason: patches 11-14 are higher EV and don't carry the
-compile-flag gating burden. X100 work is non-default by design
-(the shipped backend is A100-only and validated as such), so it
-sits behind everything that runs in the default path.
+The TODO's other X100 candidates (RoPE, norms, KV shuffle, embedding
+lookup) are weaker still — smaller absolute time, same shared LPDDR
+bottleneck. Sampling was the strongest candidate and it's already
+below detectable headroom.
 
-Expected: 5%+ if pipelined cleanly; could be 0% if both ends of
-the LPDDR controller contend during the overlap window.
+Conclusion: X100 cores are not a perf opportunity for MTP decode on
+the K3 under the current A100 + IME2 + TCM configuration. The shipped
+A100-only `cpu_mask: ff00` configuration is the right one. Closing
+the `GGML_CPU_RISCV64_SPACEMIT_X100=ON` compile-flag idea entirely —
+no plumbing to add, no flag to introduce.
 
-Risk: high. Non-default path, scheduler interaction, easy to
-silently regress the default A100-only behavior if the compile
-flag isn't enforced correctly.
+Re-open only if a future workload makes sampling a meaningfully
+larger fraction of decode (e.g., extremely small models where matmul
+cost collapses, or sampler chains substantially heavier than greedy
++ top-k).
 
 ## X100 core utilization analysis (background for patch 16)
 
@@ -1002,10 +985,11 @@ Known facts to check before any "fix":
 - **Pre-norm + nextn dual hidden-state extraction.** Two parallel buffers
   (`embd_pre_norm` sized `n_embd` for Qwen3.5, `embd_nextn` sized
   `n_embd_out` for Gemma4 via `nextn_proj_post`) with parallel flags /
-  setters / getters. **→ patch 15** (unify behind single `embd_drafter_h`).
+  setters / getters. **→ patch 15 deferred** — preserved as scaffolding
+  for upcoming MTP arches and external consumers of this fork.
 - **`mtp_on_hybrid_qwen35` is fork-only.** Qwen3.5 MTP wiring lives in
-  `src/llama-model.cpp` and isn't in upstream. Folded into patch 15 since
-  it's the same touchpoint as the embd_pre_norm/nextn unification. **→ patch 15**.
+  `src/llama-model.cpp` and isn't in upstream. **→ patch 15 deferred**
+  (cosmetic refactor only, no perf payoff).
 - **`deepstack_mapping_arr` is missing.** Granite4 Vision (upstream commit
   `64086f2b2`) added this field; a log-print referencing it was removed from
   `llama-model.cpp` during the cherry-pick. Tracking-only — restore at rebase
