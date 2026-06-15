@@ -80,7 +80,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14. Patch 15 (buffer-unification refactor) is deferred; patch 16 (X100 sampling threadpool) is dismissed. Each entry in TODO.md records the empirical close-out rationale.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14. Patch 15 (buffer-unification refactor) is deferred; patch 16 (X100 sampling threadpool) and patch 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate) are dismissed. Each entry in TODO.md records the empirical close-out rationale.
 
 The `--version` stamp in `common/arg.cpp` mirrors the same patch list and prints on every binary's `--version` invocation, so a runtime check tells you exactly which patches a deployed binary carries.
 

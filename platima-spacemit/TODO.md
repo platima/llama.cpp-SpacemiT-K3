@@ -975,6 +975,51 @@ Known facts to check before any "fix":
 - Do not "fix" by silencing the log — the fallback path needs to stay loud so
   it's visible if/when shared-mem barriers regress.
 
+## Patch 17 (DISMISSED 2026-06-16) — trunk-graph probe; ROPE-RVV and Q4_1-HP-unlock both fail the decode gate
+
+First-ever full trunk-graph profile (`GGML_OP_TIMING=1 GGML_OP_TIMING_ALL=1`),
+captured on branch `platima-ime2-trunk-probe`. Prior probe work (patch 14)
+only ever profiled the MTP block; the 97%-of-decode trunk graph had never
+been measured. Model: Qwen3.5-2B-Q4_1, `llama-completion -t 8 --no-mmap
+-fa 1 -n 200 --temp 0` (14.31 tok/s decode under the probe).
+
+Decode wall-clock breakdown (aggregated by op, TOTAL_US 5,361,665):
+- **MUL_MAT 76.5%** — already 100% on the IME2 fast path (every weight
+  tensor logs `ime` under `GGML_SPACEMIT_DISPATCH_LOG=1`).
+- GET_ROWS 4.9%, RMS_NORM 4.2% (RVV), UNARY 3.1% (SILU, RVV),
+  GLU 1.6% (SwiGLU, RVV), FLASH_ATTN_EXT 1.0% (RVV).
+- **ROPE 0.22%**, ADD 0.37%, MUL 0.19%.
+
+Two candidate patches were gated on this data and both fail:
+
+1. **ROPE RVV vectorization** (`rotate_pairs`, scalar in `ops.cpp`): at
+   0.22% of decode it is ~9× under the 2% gate. Dismissed without coding.
+
+2. **Q4_1 32×256 HP dispatch unlock** (the `// TODO` at `ime.cpp` ~1301;
+   blocked by the `quant_b_zp != NULL` `GGML_ABORT` in
+   `gemm_kernel_i8i4_hp_m1`). Decisive same-arch A/B: minted a Q4_0 by
+   requantizing the Q4_1 (lossy quality, valid for a speed test), so the
+   FFN/qkv tensors route to `q4_0_32x256_q8_0` (HP) vs the Q4_1
+   `q4_1_32x32_q8_0`. Same size, same q8_0 activations.
+   - Decode: **15.83 (HP) vs 15.98 (non-HP) tok/s** → 0%, within noise.
+   - Prefill: **pp512 119.46 (HP) vs 106.67 (non-HP) t/s** → **+12%**.
+   The HP tile only helps prefill (weight reuse across M≥4 columns); decode
+   is M=1, weight-bandwidth-bound, so wider-K tiling reads each weight once
+   either way and buys nothing. Getting the +12% prefill would require
+   hand-writing zp support into the tuned m1 asm (fragile, silent-corruption
+   risk) for zero decode benefit, on a quant type that isn't even in the
+   README perf table. Fails the decode-focused gate. Dismissed.
+
+Conclusion: the trunk graph holds no ≥2%-of-decode region that isn't already
+IME2/RVV-optimal. Decode is bandwidth-bound GEMV (~17.6 GB/s on 1.1 GB
+weights); no kernel/tile/dispatch lever moves it — only MTP (shipped) or
+smaller weights do. The patch-14 probe earned its keep here by killing two
+speculative patches before any asm was written. Branch carries this writeup
+only, no code change.
+
+Re-open the HP unlock only if a prefill-bound Q4_1 workload becomes important
+*and* someone is willing to own the m1 zp asm.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
