@@ -9,7 +9,7 @@ void llama_model_gemma4_assistant::load_arch_hparams(llama_model_loader & ml) {
     uint32_t n_kv_shared_layers = 0;
     ml.get_key(LLM_KV_ATTENTION_SHARED_KV_LAYERS, n_kv_shared_layers, false);
 
-    hparams.f_attention_scale = 1.0f;
+    hparams.f_attention_scale = 1.0f; // see gemma4.cpp: Gemma4 uses self.scaling = 1.0 (no pre-attn scaling)
 
     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.nextn_predict_layers, false);
     GGML_ASSERT(hparams.nextn_predict_layers == hparams.n_layer && "nextn_predict_layers must equal n_layer");

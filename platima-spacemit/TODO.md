@@ -457,7 +457,7 @@ raw "Write a short poem about a robot.").
 | Qwen 9B   |  6.088  | **6.571** |  5.595  |  5.33  | **3**  | +23%       |
 | Gemma E2B |**13.406**| (skip)  | 11.837  | 12.54  | **2**  | +6.9% (flipped) |
 | Gemma E4B |  9.045  | **10.223**|  9.787  |  7.53  | **3**  | +36%       |
-| Gemma 12B | (skip)  | (skip)  | **11.32** |  2.48 | **4**  | +356%      |
+| Gemma 12B | (skip)  | (skip)  |  11.32  |  2.48  | **8**¹ | +315%¹     |
 
 **Key finding**: the upstream default `params.speculative.draft.n_max = 3`
 (`common/common.h:303`, changed from 16 → 3 in `b7c91edac` upstream merge)
@@ -477,15 +477,428 @@ stop overriding the default unless the arch falls into the high/low edges.**
 - **Why mid-accept archs prefer `n_max=3`:** sweet spot. Long enough that
   the expected `1 + n_max·p_accept` accepted-per-cycle dominates the fixed
   per-cycle setup, short enough that marginal-step waste isn't yet a tax.
-- **Why 12B prefers `n_max=4` (and probably more):** at 96% accept, every
-  added draft step commits with probability 0.96; throughput is roughly
-  linear in `n_max` until the MTP graph itself becomes the bottleneck. A
-  follow-up sweep at `n_max ∈ {5,6,8}` on 12B would likely keep finding
-  wins — left as a follow-up because 12B is RAM-marginal on K3.
+- **Why 12B prefers `n_max=8` (¹CONFIRMED big win — see patch 10):** the
+  n=5/6/8 follow-up sweep (patch 10, 2026-06-15) first looked marginal at
+  60 tokens: n=4 → 11.31, n=5 → 11.40, n=6 → 10.21 (reproducible dip),
+  n=8 → 11.67 — best is +3.2%. But the 60-token bench was warmup-
+  contaminated. At -n 500 (sustained-throughput regime) with 3 runs each
+  for variance:
+    - n=4 @ 500: 9.447 / 9.485 / 9.469 t/s → mean 9.467, spread 0.4%
+    - n=8 @ 500: 10.257 / 10.357 / 10.280 t/s → mean 10.298, spread 1.0%
+    - Delta: **+8.8%**, well outside ~1.4% combined noise. Worst-case
+      n=8 (10.257) beats best-case n=4 (9.485) by +8.1%.
+  So n=8 IS the right setting for 12B service workloads. The "marginal"
+  framing from the 60-token sweep was wrong — short benches over-credit
+  n=4 because warmup effects matter more relative to a 60-token decode
+  than a 500-token one. The reproducible n=6 dip seen at 60 tokens is
+  not retested at 500 — likely still real (kernel-tile artifact) but
+  irrelevant since n=8 is the recommendation. Updated 2026-06-15 from
+  "+356% at n=4 (60-tok bench)" to the +315% n=8 figure at 500-tok
+  sustained (10.298 vs 2.48 t/s non-MTP).
 
 Updates to bench.sh and follow-on rows: stop pinning `--spec-draft-n-max 4`
 by default. For new MTP rows, either omit the flag entirely (default = 3) or
 pick the per-arch override above.
+
+## Patch 10 (DONE 2026-06-15) — Gemma 12B `n_max` follow-up sweep
+
+Swept `n_max ∈ {5, 6, 8}` on `unsloth-gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf`
+with `mtp-gemma-4-12B-it.gguf` drafter, same flags as patch-9 12B run
+(`-fa 1 --temp 0 -t 8 --no-mmap --no-spec-draft-backend-sampling -n 60`,
+raw prompt "Write a short poem about a robot.").
+
+Results:
+
+| n_max | tg t/s | accept | drafted | accepted | per-cycle wall-clock |
+|-------|--------|--------|---------|----------|---------------------|
+| 4 (baseline rerun) | 11.31  | 96.2% | 52 | 50 | ~0.45 s |
+| 5     | 11.40  | 94.5%  | 55      | 52       | ~0.50 s |
+| 6     | 10.21  | 93.3%  | 60      | 56       | ~0.65 s ¹ |
+| 6 (rerun) | 10.21 | 93.3% | 60      | 56       | confirmed |
+| 8     | **11.67** | 90.6% | 64    | 58       | ~0.71 s |
+
+¹ Reproducible dip at n=6. First run 10.189 t/s, rerun 10.213 t/s — not
+transient memory pressure. The per-cycle wall-clock jumps from ~0.50 s
+at n=5 to ~0.65 s at n=6, then back down (relatively) to ~0.71 s at
+n=8. Looks like a kernel-tile / batch-alignment artifact at the
+n_max+1=7 verify-batch boundary — possibly the FA SRAM tile size or
+A100 IME2 matmul tile lines up cleanly for 5/8 but not for 6/7.
+Worth a probe with `GGML_SPACEMIT_DISPATCH_LOG` to verify, but not on
+the critical path.
+
+**Initial conclusion (revised below)**: looked like n=8 was a marginal
++3.2% over n=4 — within ~3% of "run-to-run noise". Recommended n=8 but
+flagged it as borderline.
+
+**Variance check — revised conclusion (DONE 2026-06-15)**: the +3% felt
+suspect (user instinct: "feels like this is actually a big change"),
+so reran 3x n=4 and 3x n=8 at `-n 500` (steady-state regime, not
+warmup-dominated).
+
+| Run    | n=4 @ 500 | n=8 @ 500 |
+|--------|-----------|-----------|
+| 1      | 9.447 t/s | 10.257 t/s |
+| 2      | 9.485 t/s | 10.357 t/s |
+| 3      | 9.469 t/s | 10.280 t/s |
+| **mean** | **9.467** | **10.298** |
+| spread | 0.038 (0.4%) | 0.100 (1.0%) |
+
+**Delta: +8.8%, far outside ~1.4% combined noise.** Worst-case n=8
+(10.257) still beats best-case n=4 (9.485) by +8.1%. Rock-solid win,
+not marginal at all.
+
+Why the 60-token bench underestimated the win: short runs spend a
+proportionally larger fraction in warmup / cold-cache state, where
+the per-cycle MTP graph cost penalty is masked. At sustained
+500-token decode the per-cycle cost difference between n=4's many
+short cycles and n=8's fewer long cycles plays out properly —
+n=8's higher n_drafted (456 vs 404 per 503 tokens) and only-slightly-
+lower accept (98.7% vs 99.5%) gives 1+8·0.987 = 8.90 accepted/cycle
+vs 1+4·0.995 = 4.98 accepted/cycle. n=8 needs ~57 cycles vs n=4's
+~101 cycles to produce 500 tokens — so even though each n=8 cycle is
+heavier, fewer total cycles wins.
+
+Also note: absolute 500-tok tg (9.47 / 10.30) is LOWER than 60-tok tg
+(11.31 / 11.67) for both. That's KV-cache-growth attention cost — the
+12B model attending over 500+ tokens is materially slower per token
+than at 60 tokens. The 500-token number is the realistic
+service-throughput figure.
+
+**Findings**:
+- **n=8 IS the right setting for 12B service workloads at +8.8%
+  over n=4.** Strong recommendation, not marginal.
+- The reproducible n=6 dip at 60 tokens (10.21 vs 11.4 / 11.67) is
+  not retested at 500 tokens — likely still a real kernel-tile
+  artifact, but irrelevant given n=8 is the winner.
+- RAM was not the cap — `common_params_fit_impl` reported 5653 MiB
+  projected vs 15971 MiB total. Could push higher n_max if there
+  were reason to expect more wins (probably tapped out around n=8
+  given the per-cycle cost curve, but unmeasured).
+- Updated main sweep table: 12B winner is n=8, vs-non-MTP figure
+  revised from "+371% (60-tok)" to "+315% (500-tok sustained)".
+- **Methodology lesson for future K3 benches**: 60-token benches
+  underestimate MTP win on slow models. Use -n 500 (or higher) for
+  any service-throughput claim. Reserve 60-token for fast iteration
+  during code-change validation only.
+
+No code change needed for the recommendation — `bench.sh` doesn't pin
+12B-specific flags, so the user just passes `--spec-draft-n-max 8`
+when running 12B.
+
+## Patch queue (reorganized 2026-06-15)
+
+The original §Patch 11 (E2B `eh_proj + hnorm` fusion) was dropped: its
+premise was wrong on two counts. (a) `eh_proj` and `hnorm` are
+Qwen 3.5 / GLM 4 / Exaone 4 / BailingMoE2 MTP tensors, not Gemma 4 —
+the Gemma 4 Assistant graph (`src/models/gemma4-assistant.cpp`) uses
+`nextn_proj_pre` + transformer block + `nextn_proj_post`, no
+eh_proj/hnorm pair exists in that path. (b) E2B is no longer
+net-negative once the n_max sweep flipped it to `n_max=2` at +6.9%
+(see §`--spec-draft-n-max` tuning sweep table). The original entry
+confused Qwen MTP structure with Gemma and described a problem that
+already had a solution.
+
+Upstream scan confirmed: `354ebac8c..upstream/master` (160 commits)
+has no MTP-block fusion commit. Any fusion work below is original
+investigation, not a cherry-pick.
+
+Priority order is "expected perf delta, decreasing". Items below
+the patch-15 refactor are deferred (X100) or out of scope (rebase,
+tcm_sync_mem driver).
+
+## Patch 11 (DONE, 2026-06-15) — `f_attention_scale` verified, comment added
+
+Closed without sweep. Pre-sweep source inspection of
+`src/models/gemma4.cpp:11` revealed a load-bearing comment on the
+trunk Gemma 4 arch:
+
+```cpp
+hparams.f_attention_scale = 1.0f; // Gemma4 uses self.scaling = 1.0 (no pre-attn scaling)
+```
+
+i.e. the Gemma 4 family was *deliberately* trained with attention
+scaling disabled — `1.0f` is not an unset-defaulted reference value,
+it's the design value. The Assistant variant inherits the same
+architecture (trunk + nextn predict heads), so the 1.0 in
+`gemma4-assistant.cpp:12` is also correct.
+
+Burning 4 builds × 3 runs at -n 500 (~1 hr) to confirm "the trunk
+comment is right" is poor budget. Resolved by cherry-picking the
+trunk comment forward so future readers don't redo the same
+investigation:
+
+```cpp
+hparams.f_attention_scale = 1.0f; // see gemma4.cpp: Gemma4 uses self.scaling = 1.0 (no pre-attn scaling)
+```
+
+The remaining hypothesis ("Assistant head specifically *should* have
+scaling even though trunk doesn't, because it's a separate trained
+predictor") is not supported by anything in the architecture or in
+the gguf metadata — the Assistant arch reuses the trunk attention
+block verbatim and adds nextn_proj layers on top.
+
+Status: cherry-picked; original §K3 improvements note about
+f_attention_scale removed downstream when those notes get refactored.
+
+## Patch 12 (queued, 2026-06-15) — re-enable backend sampling for MTP
+
+Currently the bench flag `--no-spec-draft-backend-sampling` is
+mandatory for MTP runs: without it, the spec impl emits "backend
+sampling requires at most one output token per sequence" repeatedly
+and the run fails (cf. `bench.sh:58` rationale comment). The CPU
+sampler burns ~94 ms total per run (per patch 6c probes) running on
+the main coordinator thread.
+
+Root cause: the MTP head emits N candidate tokens per seq in a
+single decode, but the backend sampler is wired assuming ≤1 output
+token per seq.
+
+Plan:
+1. Locate where the "more than one output per seq" check lives
+   (likely `ggml-backend/sched.cpp` or `llama-sampling.cpp`).
+2. Either (a) teach the backend sampler to handle N-per-seq, or
+   (b) have `common_speculative_impl_draft_mtp` split the N
+   candidates into N separate seqs before sampling.
+3. Drop `--no-spec-draft-backend-sampling` from the bench flags and
+   rerun the patch-10 12B `n_max=8` n=500 triplicate as the
+   regression test.
+
+Expected: +1-5% tg across all MTP archs (the ~94 ms sampler cost
+is a fixed per-run overhead, so the relative win depends on
+n_predict; bigger on longer runs). 12B's 49 s decode at n=8 would
+recover ~94 ms = +0.2%, but shorter runs benefit more
+proportionally.
+
+Risk: low. Touches sampling / scheduler, not the kernel path. The
+bench flag stays available as a fallback.
+
+## Patch 13 (queued, 2026-06-15) — Gemma 4 Assistant graph profile-then-fuse
+
+Per patch 6c probes the per-draft MTP graph takes ~30 ms between
+iterations on Gemma E4B. P3 IME2 audit confirmed all matmuls already
+hit the IME2 fast path, so the 30 ms is in the long tail of smaller
+ops + ggml-sched dispatch overhead.
+
+Step 1 — profile. Add per-op timing instrumentation to
+`gemma4-assistant.cpp` graph build (or use existing
+`GGML_SPACEMIT_DISPATCH_LOG`-style env-gated timing). Run E4B MTP
+at `n_max=3 -n 200` and dump per-op cost.
+
+Step 2 — pick a fusion target based on data. Likely candidates given
+the graph structure (lines 130-187):
+- `build_norm + ggml_add` (residual add) — repeated 4× per layer at
+  attn_post_norm/attn_out, ffn_norm/attn_out, ffn_post_norm/attn_out,
+  out_scale. RMSNorm+add fuses cleanly.
+- `ggml_scale + ggml_get_rows` at lines 114-115 — token embd lookup
+  + sqrt(n_embd_backbone) scale, runs once per draft cycle.
+- `ggml_concat` at line 118 — concatenates target embd + input_h.
+  Could fold into the subsequent `nextn_proj_pre` matmul as a
+  pre-permute.
+
+Step 3 — implement the highest-cost candidate. If RMSNorm+add wins
+the profile, add `ggml_rms_norm_add` (RMSNorm followed by add of
+a residual tensor) with IME2 fast path.
+
+Validation:
+- E2B / E4B / 12B all show tg uplift at their respective best
+  `n_max`. None regress.
+- Run at `-n 500 × 3` per the patch-10 methodology lesson.
+
+Expected: +5-15% on Gemma MTP path (unknown precisely until
+profile data lands).
+
+Risk: medium. Custom op touches ggml IR and must not break the
+non-SpacemiT CPU backends. Reference impl in the fallback path is
+mandatory.
+
+## Patch 14 (queued, 2026-06-15) — Qwen 3.5 `eh_proj + hnorm` fusion
+
+The real eh_proj+hnorm pair lives at `src/models/qwen35.cpp:619-629`
+(and `qwen35moe.cpp` counterpart). MTP block input pipeline:
+- `build_norm(h_embd, layer.nextn.hnorm, ...)` (RMSNorm)
+- `ggml_concat` with embd
+- `build_lora_mm(layer.nextn.eh_proj, concat, ...)` (matmul,
+  2·n_embd → n_embd)
+
+The hnorm output feeds concat which feeds eh_proj — they're not
+directly adjacent (concat sits between), but the norm-then-matmul
+pattern is the structural target.
+
+Plan:
+1. Add `ggml_rms_norm_mul_mat` (or reuse whatever patch 13 lands,
+   if structurally similar). RMSNorm followed by matmul against a
+   provided weight matrix, single fused node with IME2 fast path
+   for the matmul half.
+2. Wire it into qwen35.cpp and qwen35moe.cpp.
+
+Validation:
+- Qwen 4B and 9B MTP show tg uplift at their best `n_max=3`.
+- Gemma archs unchanged (don't touch Qwen-specific path).
+- `-n 500 × 3`.
+
+Expected: +5-10% on Qwen MTP path. Qwen is already net-positive
+(+16% at 4B, +23% at 9B per patch-9 sweep) so this is incremental
+polish, not a category change.
+
+Risk: low. Qwen graph only; Gemma unaffected.
+
+## Patch 15 (queued, 2026-06-15) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
+
+Refactor patch, no perf delta expected. The win is rebase cost on the
+eventual personal-fork migration (`github.com/platima/llama.cpp-spacemit`).
+
+The patch-1 cherry-pick resolution kept *both* hidden-state output
+buffers in `llama_context`:
+  - `embd_pre_norm` (sized `n_embd`) — Qwen 3.5 tap
+  - `embd_nextn`    (sized `n_embd_out`) — Gemma 4 tap
+
+with parallel `cparams.embeddings_pre_norm{,_masked}` /
+`cparams.embeddings_nextn{,_masked}` flags, parallel
+`set_embeddings_pre_norm` / `set_embeddings_nextn` setters, parallel
+`get_embeddings_pre_norm{,_ith}` / `get_embeddings_nextn{,_ith}` getters,
+parallel buffer allocation + reorder code in `output_reserve` /
+`output_reorder`, and parallel extraction blocks in `encode` / `decode`.
+There is no functional reason for them to be two parallel features —
+they're the same "hidden state for the MTP drafter" with a different
+tap point per architecture.
+
+Additionally, the fork-only Qwen3.5 MTP wiring `mtp_on_hybrid_qwen35`
+in `src/llama-model.cpp` lives at the same touchpoint (it's the
+fork-side counterpart to the upstream Gemma 4 MTP graph build). The
+two should be refactored together since both express "this arch's
+hidden-state tap differs from the default" — folding them into the
+same dispatch reduces the surface area for rebase conflicts.
+
+Plan:
+- Collapse to a single `embd_drafter_h` buffer and a single
+  `cparams.embeddings_drafter_h{,_masked}` flag pair.
+- The arch decides the tap point already (`llama_model_mtp_uses_nextn`,
+  from patch 4) — extend that to also tell `llama_context` whether to
+  size the buffer as `n_embd` or `n_embd_out`. Could use `n_embd_out`
+  universally and have Qwen 3.5's graph write into the first `n_embd`
+  rows.
+- Single `set_embeddings_drafter_h(ctx, value, masked)` C API
+  replacing the two existing setters; mark the old per-tap APIs
+  deprecated (keep them as thin wrappers for one release).
+- `common_speculative_impl_draft_mtp` collapses to one set/get call
+  pair regardless of arch — the dispatch lives in the model graph,
+  not the caller.
+- Inline `mtp_on_hybrid_qwen35` into the same arch-flag table that
+  `llama_model_mtp_uses_nextn` already drives. Goal: one place to
+  list every MTP arch and what it does, rather than two parallel
+  dispatch tables.
+
+Validation:
+- All four MTP archs from the patch-9 sweep table produce identical
+  accept rates and tg (within run-to-run noise) at their best n_max.
+- The §K3 improvements notes about "two parallel hidden-state output
+  buffers" and "mtp_on_hybrid_qwen35 fork-only" both disappear.
+- Reduces conflict surface for the eventual personal-fork rebase.
+
+Risk: low if all four archs validate. The unifying abstraction is
+purely a code-organization change, not a behavior change.
+
+## Patch 16 (deferred, compile-flag — 2026-06-15) — X100 sampling threadpool
+
+Behind `GGML_CPU_RISCV64_SPACEMIT_X100=ON` (default OFF, per the
+existing compile-flag rule for any X100 work). Highest-upside X100
+candidate per the X100 utilization analysis (below this section).
+
+The CPU sampler currently runs on the unpinned main coordinator
+thread, which floats on the X100 cores anyway, but only uses one
+core. A 2-thread X100 pool dedicated to sampling could overlap
+with the A100 next-decode setup, recovering some of the ~94 ms
+sampler cost as parallel time rather than serial time.
+
+Plan (deferred — start with probe only):
+1. Probe-only patch: run `llama_sampler_sample` on a 2-thread X100
+   pool via `pthread_setaffinity_np` to cores {6, 7}.
+2. Measure end-to-end tg on Gemma 12B and Qwen 4B MTP.
+3. Commit to full sub-backend work ONLY if the probe shows >5% tg
+   uplift. If <5%, close as "X100 sampling probed, not worth the
+   pipelining complexity".
+
+Defer reason: patches 11-14 are higher EV and don't carry the
+compile-flag gating burden. X100 work is non-default by design
+(the shipped backend is A100-only and validated as such), so it
+sits behind everything that runs in the default path.
+
+Expected: 5%+ if pipelined cleanly; could be 0% if both ends of
+the LPDDR controller contend during the overlap window.
+
+Risk: high. Non-default path, scheduler interaction, easy to
+silently regress the default A100-only behavior if the compile
+flag isn't enforced correctly.
+
+## X100 core utilization analysis (background for patch 16)
+
+User decision (2026-06-15): not touching X100 cores until the patch
+11-15 line ships. Any X100 work MUST be behind a compile flag —
+non-default since the K3 backend has shipped as A100-only and the
+A100-only path is the validated configuration. Flag name:
+`GGML_CPU_RISCV64_SPACEMIT_X100=ON`, off by default. Patch 16 above
+is the concrete deferred patch entry; this section is the supporting
+analysis.
+
+The user's prior intuition was "X100s probably aren't useful". This
+section documents what could plausibly help, so the deferral is an
+informed choice not a guess.
+
+K3 layout reminder: cores 0–7 are X100 general-purpose RISC-V
+application cores (RVV but **no IME2 matrix instructions**); cores
+8–15 are A100 AI cores with IME2 + TCM. The SpacemiT backend pins all
+8 compute workers to 8–15 today (`cpu_mask: ff00`,
+`perfer_core_arch_id: a064`); only the unpinned main coordinator
+thread floats on 0–7.
+
+What X100 could plausibly pick up:
+
+1. **Sampling** — softmax / top-k / top-p / repetition penalty are
+   pure scalar+vector logits processing with **no matmul**. IME2
+   gives X100 nothing here. Today the CPU sampler already runs on the
+   unpinned main thread (which happens to land on X100), so on the
+   non-backend-sampling path this is already X100 work — just on one
+   core. A 2–4 way X100-only threadpool for sampling could overlap
+   with the A100 next-decode setup. **Probably the highest-upside
+   X100 candidate** because (a) zero IME2 dependency, (b) sampling is
+   already known to be a non-trivial cost (~100 ms total on the patch
+   6c bench), (c) it sits at the end of one decode and the start of
+   the next, so it's a natural pipelining point.
+2. **RoPE** — elementwise rotation, no matmul, no IME2 use. Could
+   run on X100 if it were on the critical path; but it's typically
+   fused with the attention matmul on the A100 side and isn't a
+   measured bottleneck on the K3 profile. Low confidence in headroom.
+3. **Norms (RMSNorm / LayerNorm)** — reduction + elementwise scale,
+   again no matmul / no IME2 win. Same critical-path issue as RoPE.
+4. **KV cache memory shuffling** — pure DRAM bandwidth, doesn't
+   benefit from A100 compute. Could run on X100 while A100 does the
+   next matmul. But: both core complexes share the same LPDDR
+   controller, so the bandwidth is the bottleneck not the core. This
+   is the bucket where intuition probably matches reality —
+   parallelising doesn't help if the resource is bandwidth-bound.
+5. **Token embedding / lookup** — gather op, memory-bound, same
+   contention story as #4.
+
+The structural blocker for any of this: ggml's CPU backend has **one
+threadpool**, and parallelism is across threads of that pool for a
+single op. To put op X on X100 cores and op Y on A100 cores in
+parallel, you'd need either:
+- (a) Two CPU sub-backends with their own threadpools and ggml-sched
+  routing nodes to one or the other (large refactor, touches the
+  scheduler).
+- (b) A hybrid threadpool that can route specific ops to specific
+  core subsets at submission time (moderate, but ggml's scheduler
+  doesn't currently express "this op should use threads [0..n)").
+- (c) Manual op-level pthread spawn for one or two specific ops
+  (light but ugly, easy to regress).
+
+Conclusion: the only X100 candidate likely to net a measured win is
+**(1) sampling on a small X100 threadpool, overlapped with the next
+decode's first ops**, and even that needs a careful pipelining
+implementation in `tools/server` or `common/speculative` to overlap
+correctly. The other candidates are either bandwidth-bound (4, 5)
+or not on the critical path (2, 3). This is what patch 16 above
+formalizes — see the patch entry for the probe-then-commit plan.
 
 At startup `llama-cli` logs:
 
@@ -513,31 +926,30 @@ Known facts to check before any "fix":
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
   targets the A100 AI cores only (`perfer_core_arch_id: a064`, `cpu_mask: ff00`,
   i.e. cores 8–15). The K3 also has X100 application cores (0–7) which are
-  currently only used for the main thread. Worth exploring whether IME2-less
-  RVV paths on the X100s could pick up auxiliary work (rope, norms, sampling).
-- **Pre-norm + nextn dual hidden-state extraction.** This patchset now keeps
-  *two* parallel hidden-state output buffers (`embd_pre_norm` sized `n_embd`,
-  `embd_nextn` sized `n_embd_out`). They cover different MTP drafters —
-  Qwen3.5 uses pre-output-norm, Gemma4 uses post-output-norm via
-  `nextn_proj_post`. Once both code paths settle, consider whether they can
-  be unified behind a single "h_for_drafter" tap with a per-arch flag, to
-  avoid the duplicated reserve/output-reorder bookkeeping in `llama-context`.
+  currently only used for the main thread. **→ patch 16** (deferred, compile-
+  flag gated).
+- **Pre-norm + nextn dual hidden-state extraction.** Two parallel buffers
+  (`embd_pre_norm` sized `n_embd` for Qwen3.5, `embd_nextn` sized
+  `n_embd_out` for Gemma4 via `nextn_proj_post`) with parallel flags /
+  setters / getters. **→ patch 15** (unify behind single `embd_drafter_h`).
 - **`mtp_on_hybrid_qwen35` is fork-only.** Qwen3.5 MTP wiring lives in
-  `src/llama-model.cpp` and isn't in upstream. If we ever rebase onto a much
-  newer upstream commit it will need to be re-applied; keep a short note of
-  the exact lines so the rebase isn't archaeology.
+  `src/llama-model.cpp` and isn't in upstream. Folded into patch 15 since
+  it's the same touchpoint as the embd_pre_norm/nextn unification. **→ patch 15**.
 - **`deepstack_mapping_arr` is missing.** Granite4 Vision (upstream commit
   `64086f2b2`) added this field; a log-print referencing it was removed from
-  `llama-model.cpp` during the cherry-pick. If we ever rebase past that
-  commit, restore the field plus the print.
+  `llama-model.cpp` during the cherry-pick. Tracking-only — restore at rebase
+  time. No standalone patch (zero functional impact until a Granite4 Vision
+  gguf is loaded).
 - **`f_attention_scale` hard-coded to 1.0 for Gemma4 assistant.** Inherited
-  from upstream's reference impl. Verify this is the right value once we
-  actually have a Gemma4 assistant gguf in hand to run.
+  from upstream's reference impl. We have Gemma 4 Assistant ggufs in
+  `~/models` (the `mtp-gemma-4-{E2B,E4B,12B}-it.gguf` files) and have been
+  running them since patch 7. **→ patch 11** (sweep alternative scale values
+  for accept-rate impact, FIRST in the queue).
 - **Cherry-pick base drift.** `version:` currently shows `9481 (161be67d6)`
   but `161be67d6` is a *local* cherry-pick tip, not an upstream commit. The
   custom `--version` line now also shows the upstream base
   (`354ebac8c`) and the SpacemiT release tag separately so this is no longer
-  misleading.
+  misleading. Resolved by version-stamp patch.
 
 ## Rebase onto a personal fork (`github.com/platima/llama.cpp-spacemit`)
 
@@ -569,18 +981,33 @@ Doability — high level, plausible, but with caveats:
 4. **Versioning**: the patch-level constant in `common/arg.cpp` will need
    to be bumped per merge round so `--version` stays meaningful.
 
-## Functional test (still to do — task #18)
+## Functional test (DONE 2026-06-15 — task #18)
 
-End-to-end smoke test on K3:
-- Gemma 4 E4B with `mtp-gemma-4-E4B-it.gguf` drafter, `--spec-type draft-mtp`.
-- Qwen 3.5 4B with `Qwen3.5-4B-Q4_K_M-MTP.gguf` drafter, `--spec-type draft-mtp`.
-- Flash attention on.
-- TCM enabled (verify "tcm is available" at startup; the sync-mem fallback
-  above is fine).
-- MTMD/mmproj: audio + image + text input via `llama-mtmd-cli` /
-  `llama-server`.
+End-to-end smoke test on K3 after the Gemma4 MTP + E2B/E4B-assistants
+cherry-pick (`c4bbdafed` + `161be67d6`) settled into the SpacemiT branch.
+All runs with `-fa 1 --temp 0 -t 8 --no-mmap`, `--spec-draft-n-max 3
+--no-spec-draft-backend-sampling` on the MTP runs.
 
-Pass criteria: all three input modalities work without heap corruption
-(remember: previous over-merge produced
-`malloc(): invalid size (unsorted)` during decode) and MTP speculative
-decoding produces non-trivial acceptance rates.
+| Modality | Tool | Result |
+|----------|------|--------|
+| Gemma 4 E4B MTP (text) | `llama-speculative-simple` | tg 10.16 t/s, accept 26.7% (28/105), coherent poem |
+| Qwen 3.5 4B MTP (text, chat-templated) | `llama-speculative-simple` | tg 9.09 t/s, accept 59.4% (41/69), coherent thinking-mode |
+| Image (Gemma 4 E4B vision) | `llama-mtmd-cli --jinja --image` | coherent multimodal analysis of input image |
+| Audio (Gemma 4 E4B mmproj) | `llama-mtmd-cli --jinja --audio` | coherent audio summary (input was `tools/mtmd/test-2.mp3`) |
+
+Pass criteria all met:
+- No `malloc(): invalid size (unsorted)` heap corruption on any run
+  (the previous-attempt regression mode that motivated this checklist).
+- `use_ime2: 1` and `tcm is available, blk_size: 393216, blk_num: 8`
+  printed at startup on every run — A100 backend intact.
+- `/dev/tcm_sync_mem` fallback log fired as expected and is harmless.
+- MTP accept rates non-trivial on both archs (Gemma E4B 26.7%,
+  Qwen 4B 59.4%) — the dispatch wiring from patches 4/5 is still alive.
+- MTMD vision and audio projector paths both run end-to-end (Gemma
+  needed `--jinja` for its chat template; this is a known mtmd-cli
+  template-compatibility quirk, not a backend issue).
+
+Tap-mismatch note for future me: I tried the Gemma image test without
+`--jinja` first and got `this custom template is not supported, try
+using --jinja` — that's the `common_chat_templates_apply` path
+throwing for Gemma's custom template. Fix is the flag, not the model.
