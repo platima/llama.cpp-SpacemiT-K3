@@ -705,44 +705,62 @@ Status: closed. K3 doesn't currently benefit from draft-side backend
 sampling; revisit if backend sampler becomes cheaper-per-decode in
 a future ggml release.
 
-## Patch 13 (queued, 2026-06-15) — Gemma 4 Assistant graph profile-then-fuse
+## Patch 13 (DONE 2026-06-15) — Gemma 4 RMS_NORM + MUL + ADD fusion, dismissed empirically
 
-Per patch 6c probes the per-draft MTP graph takes ~30 ms between
-iterations on Gemma E4B. P3 IME2 audit confirmed all matmuls already
-hit the IME2 fast path, so the 30 ms is in the long tail of smaller
-ops + ggml-sched dispatch overhead.
+Path explored: inspection of `gemma4-assistant.cpp:161-164` identified
+`attn_post_norm + residual add` (and three sibling pairs per layer) as
+a clean RMSNorm+MUL → ADD triple. The pre-existing
+`ggml_cpu_try_fuse_ops` already fuses RMS_NORM+MUL; extending that to
+RMS_NORM+MUL+ADD as a third FUSE_OP enum variant was straightforward.
 
-Step 1 — profile. Add per-op timing instrumentation to
-`gemma4-assistant.cpp` graph build (or use existing
-`GGML_SPACEMIT_DISPATCH_LOG`-style env-gated timing). Run E4B MTP
-at `n_max=3 -n 200` and dump per-op cost.
+Implementation done and built (see git stash dropped during validation):
+- `enum ggml_rms_norm_fuse_op` extended with `GGML_RMS_NORM_FUSE_OP_MUL_ADD`
+- `ggml_compute_forward_rms_norm_mul_add_fused()` wrapper added
+- 3-op detect inserted ahead of the 2-op detect in `ggml_cpu_try_fuse_ops`
+- Inner loop: `y[i] = x[i] * scale * w[i] + r[i]` (single pass)
 
-Step 2 — pick a fusion target based on data. Likely candidates given
-the graph structure (lines 130-187):
-- `build_norm + ggml_add` (residual add) — repeated 4× per layer at
-  attn_post_norm/attn_out, ffn_norm/attn_out, ffn_post_norm/attn_out,
-  out_scale. RMSNorm+add fuses cleanly.
-- `ggml_scale + ggml_get_rows` at lines 114-115 — token embd lookup
-  + sqrt(n_embd_backbone) scale, runs once per draft cycle.
-- `ggml_concat` at line 118 — concatenates target embd + input_h.
-  Could fold into the subsequent `nextn_proj_pre` matmul as a
-  pre-permute.
+Validation — `-n 500 × 3` A/B (stash → rebuild → bench → pop → rebuild):
 
-Step 3 — implement the highest-cost candidate. If RMSNorm+add wins
-the profile, add `ggml_rms_norm_add` (RMSNorm followed by add of
-a residual tensor) with IME2 fast path.
+| Model | n_max | BEFORE tg | AFTER tg | Δ tg    | Trajectory |
+|-------|-------|-----------|----------|---------|------------|
+| E2B   | 2     | 12.426    | 11.167   | **−10.1%** | drifted: accept 31.5%→23.0%, n_drafted 92→74 |
+| E4B   | 3     | 9.465     | 10.565   | **+11.6%** | drifted: accept 27.0%→34.2%, n_drafted 126→117 |
+| 12B   | 4     | 9.171     | 9.178    | **+0.08%** | bit-identical: same accept %, n_drafted, n_accept |
 
-Validation:
-- E2B / E4B / 12B all show tg uplift at their respective best
-  `n_max`. None regress.
-- Run at `-n 500 × 3` per the patch-10 methodology lesson.
+Verdict: dismissed. 12B is the clean kernel A/B because its logit
+margins are wide enough that the fused kernel's 1-ulp FMA folding
+(`a*scale*w + r` collapses into one FMA, ≠ separate mul-then-add) does
+not flip any argmax, so the trajectory is bit-stable. On that clean
+A/B the kernel saves **+0.08%** — within session σ (~0.01-0.03 t/s),
+indistinguishable from noise.
 
-Expected: +5-15% on Gemma MTP path (unknown precisely until
-profile data lands).
+The E4B/E2B numbers were driven by FMA-induced trajectory drift, not
+by kernel speedup: at temp=0 a 1-ulp logit shift can flip the greedy
+argmax on close-margin tokens, cascading into a totally different
+generation path. E4B got "lucky" trajectory (higher accept, faster);
+E2B got "unlucky" (lower accept, slower). Real-world tg shifts but
+isn't a function of the kernel — and the direction isn't predictable
+per prompt/model. Not a robust win.
 
-Risk: medium. Custom op touches ggml IR and must not break the
-non-SpacemiT CPU backends. Reference impl in the fallback path is
-mandatory.
+Why the kernel save is negligible on K3:
+- The pre-existing 2-op RMS_NORM+MUL fusion already collapses the
+  dominant cost (rms-scan + weight multiply in one pass).
+- The marginal save from folding the residual ADD is one load+store
+  per row of n_embd floats — bounded by memory bandwidth, which the
+  2-op kernel was likely already saturating.
+- ggml-sched dispatch overhead per node is sub-millisecond on this
+  graph; folding two nodes into one saves the dispatch but the
+  absolute saving is too small to register in -n 500 × 3 bench σ.
+
+Action taken: code reverted (no commit to ggml/src/ggml-cpu/). TODO
+section and `results.log` carry the empirical A/B rows for the
+permanent record. Pattern matches patches 11 and 12: implementation
+ready, bench data killed the premise, dismissed without committing.
+
+Don't re-explore RMS_NORM+ADD or similar small-tensor residual
+fusions on K3 unless a profiler-grade per-op timing tool shows the
+residual ADD pass costing >5% of per-iter time — empirically it does
+not (this exercise was that profile, by elimination).
 
 ## Patch 14 (queued, 2026-06-15) — Qwen 3.5 `eh_proj + hnorm` fusion
 
