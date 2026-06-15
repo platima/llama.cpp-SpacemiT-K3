@@ -1,5 +1,7 @@
 # llama.cpp
 
+> **Note — this is the Platima SpacemiT-K3 fork.** Working branch: `platima-mtmd`. Adds Multi-Token Prediction (MTP) wiring for Qwen 3.5 and Gemma 4, plus multimodal (vision + audio) support, on top of the SpacemiT K3 RISC-V backend. See [`platima-spacemit/README.md`](platima-spacemit/README.md) for fork-specific docs and patch history. `master` tracks upstream `ggml-org/llama.cpp` and carries none of these patches.
+
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)

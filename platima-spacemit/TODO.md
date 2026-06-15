@@ -2,7 +2,7 @@
 
 Tracking items deferred from the Gemma4 MTP cherry-pick work.
 
-## Patch history (on top of release 0.1.3 / upstream base `354ebac8c`)
+## Patch history on branch `platima-mtmd` (on top of SpacemiT release 0.1.3 / upstream base `354ebac8c`)
 
 - **patch 1**: Cherry-pick of Gemma4 MTP (#23398) and Gemma4 E2B/E4B assistants
   (#24282) from upstream; SpacemiT toolchain flags codified in `build.sh` and

@@ -1090,6 +1090,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &) {
             fprintf(stderr, "version: %d (%s)\n", llama_build_number(), llama_commit());
             fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
+            fprintf(stderr, "Platima SpacemiT-K3 fork (branch: platima-mtmd)\n");
             fprintf(stderr, "SpacemiT release: 0.1.3 (patch 1: Gemma4 MTP + E2B/E4B assistants)\n");
             fprintf(stderr, "                       (patch 2: speculative-simple MTP-on-target, avoid 2x model load)\n");
             fprintf(stderr, "                       (patch 3: investigation - confirmed Qwen3.5 MTP tap mismatch in common/speculative.cpp)\n");
@@ -1099,7 +1100,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             fprintf(stderr, "                       (patch 6b: speculative-simple calls common_speculative_process - fixes zero-vector h input to MTP)\n");
             fprintf(stderr, "                       (patch 6c: speculative-simple warms up pending_h with h(id_last) - non-zero MTP input on iter 1)\n");
             fprintf(stderr, "                       (patch 7: speculative-simple sets ctx_other/n_rs_seq in --model-draft MTP path - fixes Gemma4 Assistant)\n");
+            fprintf(stderr, "                       (patch 8: cli MTP-aware via shared server-context paths, completion --spec-type close-out)\n");
             fprintf(stderr, "                       (patch 9: backport upstream e95dae18d - remove padding and multiple D2D copies in ggml_gated_delta_net for Qwen3.5 MTP, +43-53%% tg)\n");
+            fprintf(stderr, "                       (patch 10: n_max tuning sweep across all MTP archs - per-arch defaults validated at -n 500)\n");
+            fprintf(stderr, "                       (patch 11: f_attention_scale verified for Gemma4 - source comment, no kernel work)\n");
+            fprintf(stderr, "                       (patch 12: backend sampling premise empirically resolved - --no-spec-draft-backend-sampling stale flag dropped)\n");
+            fprintf(stderr, "                       (patch 13: RMS_NORM+MUL+ADD 3-op fusion target dismissed - below patch-10 1.4%% noise floor on K3)\n");
+            fprintf(stderr, "                       (patch 14: GGML_OP_TIMING env-gated per-tensor wall-clock probe; eh_proj+hnorm fusion target dismissed)\n");
+            fprintf(stderr, "                       (patch 15: embd_pre_norm/embd_nextn unification deferred - preserve parallel tap infrastructure)\n");
+            fprintf(stderr, "                       (patch 16: X100 sampling threadpool dismissed - sampling already <=1.4%% of decode wall-clock)\n");
             fprintf(stderr, "upstream llama.cpp base: 354ebac8c\n");
             exit(0);
         }

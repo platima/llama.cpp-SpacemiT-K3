@@ -3,10 +3,10 @@ name: CI (SpacemiT MTMD)
 on:
   push:
     branches:
-      - spacemit-mtmd
+      - platima-mtmd
   pull_request:
     branches:
-      - spacemit-mtmd
+      - platima-mtmd
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -262,7 +262,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v6
         with:
-          name: spacemit-mtmd-package
+          name: platima-mtmd-package
           path: release/${{ steps.vars.outputs.package_name }}.tar.gz
           if-no-files-found: error
           retention-days: 7
@@ -277,7 +277,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: release/${{ steps.vars.outputs.package_name }}.tar.gz
           body: |
-            SpacemiT MTMD build for `spacemit-mtmd`.
+            SpacemiT MTMD build for `platima-mtmd`.
             Version: `${{ steps.vars.outputs.version_number }}`
             Package: `${{ steps.vars.outputs.package_name }}.tar.gz`
             Commit: `${{ github.sha }}`

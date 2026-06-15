@@ -3,7 +3,7 @@ name: Comment merged PR summary
 on:
   pull_request:
     branches:
-      - spacemit-mtmd
+      - platima-mtmd
     types:
       - closed
 
