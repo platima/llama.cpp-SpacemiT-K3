@@ -762,36 +762,56 @@ fusions on K3 unless a profiler-grade per-op timing tool shows the
 residual ADD pass costing >5% of per-iter time — empirically it does
 not (this exercise was that profile, by elimination).
 
-## Patch 14 (queued, 2026-06-15) — Qwen 3.5 `eh_proj + hnorm` fusion
+## Patch 14 (DONE 2026-06-15) — `GGML_OP_TIMING` probe instrumentation; eh_proj+hnorm fusion target dismissed
 
-The real eh_proj+hnorm pair lives at `src/models/qwen35.cpp:619-629`
-(and `qwen35moe.cpp` counterpart). MTP block input pipeline:
-- `build_norm(h_embd, layer.nextn.hnorm, ...)` (RMSNorm)
-- `ggml_concat` with embd
-- `build_lora_mm(layer.nextn.eh_proj, concat, ...)` (matmul,
-  2·n_embd → n_embd)
+Original target was a `RMSNorm + concat + matmul` fusion at
+`qwen35.cpp:556-566` (the MTP block's `mtp_hnorm` / `mtp_enorm` ->
+`mtp_concat` -> `mtp_eh_proj` chain). Patch 13's dismissal made the
+right move clear: profile first, code second.
 
-The hnorm output feeds concat which feeds eh_proj — they're not
-directly adjacent (concat sits between), but the norm-then-matmul
-pattern is the structural target.
+Pivoted to building the profiler itself — an env-gated, thread-0
+per-named-tensor wall-clock recorder (`GGML_OP_TIMING=1` in
+`ggml/src/ggml-cpu/ggml-cpu.c`). Mirrors the `GGML_SPACEMIT_DISPATCH_LOG`
+pattern. Filters to `mtp_*` / `h_*` names by default (the MTP-block
+region); `GGML_OP_TIMING_ALL=1` records every named tensor. atexit()
+prints a sorted table.
 
-Plan:
-1. Add `ggml_rms_norm_mul_mat` (or reuse whatever patch 13 lands,
-   if structurally similar). RMSNorm followed by matmul against a
-   provided weight matrix, single fused node with IME2 fast path
-   for the matmul half.
-2. Wire it into qwen35.cpp and qwen35moe.cpp.
+Probe result — Qwen 3.5-4B MTP `-n 200 --temp 0`, n_max=3, 319 MTP
+graph evaluations, 25.761 s decode:
 
-Validation:
-- Qwen 4B and 9B MTP show tg uplift at their best `n_max=3`.
-- Gemma archs unchanged (don't touch Qwen-specific path).
-- `-n 500 × 3`.
+| name              | op       | total_us | % MTP block | % decode |
+|-------------------|----------|---------:|------------:|---------:|
+| mtp_ffn_out       | MUL_MAT  | 286,255  | 40.16%      | 1.11%    |
+| mtp_eh_proj       | MUL_MAT  | 184,456  | 25.88%      | 0.72%    |
+| mtp_Qcur_full     | MUL_MAT  | 149,565  | 20.98%      | 0.58%    |
+| mtp_attn_out      | MUL_MAT  |  77,343  | 10.85%      | 0.30%    |
+| mtp_tok_embd      | GET_ROWS |   6,089  |  0.85%      | 0.024%   |
+| **mtp_concat**    | CONCAT   |   3,769  |  0.53%      | 0.015%   |
+| h_pre_norm        | ADD      |   2,095  |  0.29%      | 0.008%   |
+| mtp_gate          | CONT     |   1,831  |  0.26%      | 0.007%   |
+| mtp_attn_residual | ADD      |   1,355  |  0.19%      | 0.005%   |
 
-Expected: +5-10% on Qwen MTP path. Qwen is already net-positive
-(+16% at 4B, +23% at 9B per patch-9 sweep) so this is incremental
-polish, not a category change.
+MTP block total: 712,758 us = **2.77 % of decode wall-clock**.
+The four IME2-accelerated matmuls account for 97.87 % of that block;
+everything else (concat, residual adds, hnorm/enorm hidden inside the
+already-fused 2-op RMS_NORM+MUL kernels) is below the noise floor.
 
-Risk: low. Qwen graph only; Gemma unaffected.
+Conclusion: dismissing the original `eh_proj+hnorm` fusion target.
+Best-case kernel save (fold concat + materialise hnorm into eh_proj)
+is bounded above by the sum of `mtp_concat` + h_pre_norm + small adds
+= **<0.1 % of decode wall-clock**. Two orders of magnitude below the
+1.4 % patch-10 noise floor; no commit-worthy delta achievable.
+
+What stays: the `GGML_OP_TIMING` probe itself. Off by default, zero
+overhead unless env is set. From now on, any future SpacemiT-fork
+fusion patch must run this probe first and show ≥ 2 % of decode
+wall-clock in the target region before coding.
+
+Usage:
+```
+GGML_OP_TIMING=1 llama-speculative-simple ...  2>&1 | grep -A100 GGML_OP_TIMING
+GGML_OP_TIMING=1 GGML_OP_TIMING_ALL=1 ...      # record every named tensor (large)
+```
 
 ## Patch 15 (queued, 2026-06-15) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
 

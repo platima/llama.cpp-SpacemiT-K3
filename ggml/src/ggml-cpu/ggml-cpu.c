@@ -2972,6 +2972,76 @@ struct ggml_cplan ggml_graph_plan(
 }
 
 
+// Per-op timing probe (env-gated, thread-0 only). Used to profile which named
+// tensors actually consume measurable wall-clock during compute. Off unless
+// GGML_OP_TIMING=1. By default only names starting with "mtp_" or "h_" are
+// recorded (the MTP-block region used by the SpacemiT fork's profile-then-fuse
+// methodology); set GGML_OP_TIMING_ALL=1 to record every named tensor.
+#define GGML_OP_TIMING_MAX_ENTRIES 512
+struct ggml_op_timing_entry {
+    char    name[GGML_MAX_NAME];
+    int     op;
+    int64_t count;
+    int64_t total_us;
+};
+static struct ggml_op_timing_entry ggml_op_timing_table[GGML_OP_TIMING_MAX_ENTRIES];
+static int  ggml_op_timing_n = 0;
+static bool ggml_op_timing_enabled = false;
+static bool ggml_op_timing_atexit_registered = false;
+
+static int ggml_op_timing_cmp(const void * a, const void * b) {
+    const struct ggml_op_timing_entry * ea = (const struct ggml_op_timing_entry *)a;
+    const struct ggml_op_timing_entry * eb = (const struct ggml_op_timing_entry *)b;
+    if (eb->total_us > ea->total_us) return  1;
+    if (eb->total_us < ea->total_us) return -1;
+    return 0;
+}
+
+static void ggml_op_timing_print(void) {
+    if (ggml_op_timing_n == 0) return;
+    qsort(ggml_op_timing_table, ggml_op_timing_n, sizeof(ggml_op_timing_table[0]), ggml_op_timing_cmp);
+    int64_t total = 0;
+    for (int i = 0; i < ggml_op_timing_n; i++) total += ggml_op_timing_table[i].total_us;
+    fprintf(stderr, "\n=== GGML_OP_TIMING (thread-0 wall-clock per named tensor, summed across compute calls) ===\n");
+    fprintf(stderr, "%-48s %-16s %10s %14s %8s\n", "name", "op", "count", "total_us", "pct");
+    for (int i = 0; i < ggml_op_timing_n; i++) {
+        const struct ggml_op_timing_entry * e = &ggml_op_timing_table[i];
+        double pct = total ? (100.0 * (double)e->total_us / (double)total) : 0.0;
+        fprintf(stderr, "%-48s %-16s %10lld %14lld %7.2f%%\n",
+                e->name, ggml_op_name((enum ggml_op)e->op),
+                (long long)e->count, (long long)e->total_us, pct);
+    }
+    fprintf(stderr, "TOTAL_US: %lld   ENTRIES: %d/%d\n",
+            (long long)total, ggml_op_timing_n, GGML_OP_TIMING_MAX_ENTRIES);
+}
+
+static void ggml_op_timing_record(const struct ggml_tensor * node, int64_t us) {
+    if (node->name[0] == '\0') return;
+    // Trunk graphs emit thousands of unique named tensors that quickly fill
+    // GGML_OP_TIMING_MAX_ENTRIES, so by default we record only the MTP-block
+    // names ("mtp_*" or "h_*"). Override with GGML_OP_TIMING_ALL=1.
+    static int filter_mtp_only = -1;
+    if (filter_mtp_only == -1) {
+        const char * env = getenv("GGML_OP_TIMING_ALL");
+        filter_mtp_only = (env != NULL && atoi(env) == 1) ? 0 : 1;
+    }
+    if (filter_mtp_only && strncmp(node->name, "mtp_", 4) != 0 && strncmp(node->name, "h_", 2) != 0) return;
+    for (int i = 0; i < ggml_op_timing_n; i++) {
+        if (strcmp(ggml_op_timing_table[i].name, node->name) == 0) {
+            ggml_op_timing_table[i].count++;
+            ggml_op_timing_table[i].total_us += us;
+            return;
+        }
+    }
+    if (ggml_op_timing_n >= GGML_OP_TIMING_MAX_ENTRIES) return;
+    struct ggml_op_timing_entry * e = &ggml_op_timing_table[ggml_op_timing_n++];
+    strncpy(e->name, node->name, GGML_MAX_NAME - 1);
+    e->name[GGML_MAX_NAME - 1] = '\0';
+    e->op       = (int)node->op;
+    e->count    = 1;
+    e->total_us = us;
+}
+
 // Try to fuse the current node with subsequent nodes for better performance.
 // Returns the number of nodes skipped by fusion (>=1), or 0 if no fusion was applied.
 static bool ggml_cpu_disable_fusion = false;  // initialized once in ggml_cpu_init(), read-only afterwards
@@ -3052,11 +3122,19 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
 
         // TODO: move fused-op detection into ggml_graph_plan so fusion decisions are made once at planning time
         // Try fused ops, fall back to normal compute
+        const bool time_this = ggml_op_timing_enabled && state->ith == 0;
+        const int64_t t0 = time_this ? ggml_time_us() : 0;
         const int n_fused = ggml_cpu_try_fuse_ops(cgraph, node_n, &params, cplan);
         if (n_fused > 0) {
             node_n += n_fused;
         } else {
             ggml_compute_forward(&params, node);
+        }
+        // Records thread 0's compute time only (pre-barrier). Stragglers on
+        // other threads are not included, but for hot-path discovery this is
+        // a tight estimate.
+        if (time_this) {
+            ggml_op_timing_record(node, ggml_time_us() - t0);
         }
 
         if (state->ith == 0 && cplan->abort_callback &&
@@ -3826,6 +3904,15 @@ void ggml_cpu_init(void) {
         {
             const char * env = getenv("GGML_CPU_DISABLE_FUSION");
             ggml_cpu_disable_fusion = (env != NULL && atoi(env) == 1);
+        }
+
+        {
+            const char * env = getenv("GGML_OP_TIMING");
+            ggml_op_timing_enabled = (env != NULL && atoi(env) == 1);
+            if (ggml_op_timing_enabled && !ggml_op_timing_atexit_registered) {
+                atexit(ggml_op_timing_print);
+                ggml_op_timing_atexit_registered = true;
+            }
         }
 
         is_first_call = false;
