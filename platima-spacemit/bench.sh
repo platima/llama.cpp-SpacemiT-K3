@@ -52,10 +52,13 @@ PROMPT="Explain how RISC-V vector extensions speed up matrix multiplication."
 # llama-speculative-simple to create the MTP draft context against the target,
 # avoiding a duplicate model load that on a 4B model blew past the K3's 16 GB RAM
 # during warmup (~15 GB observed). Mirror of tools/server/server-context.cpp.
-# --no-spec-draft-backend-sampling: the MTP head emits N candidate tokens per seq
-# in a single decode; the backend sampler can't handle >1 output per seq and floods
-# with "backend sampling requires at most one output token per sequence" errors.
-MTP="--spec-type draft-mtp --spec-draft-n-max 4 --no-spec-draft-backend-sampling"
+# Backend sampling is left at default (off). The original 'mandatory --no-' rationale
+# was stale — patch 12 (2026-06-15) found the assertion no longer fires AND that
+# enabling backend sampling on draft is net-negative on K3 (-4.1% tg, +250 ms total)
+# because the CPU sampler in common_speculative_impl_draft_mtp::draft() still runs
+# to populate candidates for p_min. Re-add --no-spec-draft-backend-sampling only if
+# you see the "backend sampling requires at most one output per sequence" error.
+MTP="--spec-type draft-mtp --spec-draft-n-max 4"
 
 # ---- A100 core verification helper -----------------------------------------
 # Samples per-thread last-CPU for $pid every 0.5s for ~3s, then prints a

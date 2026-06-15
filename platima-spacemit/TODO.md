@@ -640,37 +640,70 @@ block verbatim and adds nextn_proj layers on top.
 Status: cherry-picked; original §K3 improvements note about
 f_attention_scale removed downstream when those notes get refactored.
 
-## Patch 12 (queued, 2026-06-15) — re-enable backend sampling for MTP
+## Patch 12 (DONE, 2026-06-15) — premise resolved, no perf benefit; flag dropped
 
-Currently the bench flag `--no-spec-draft-backend-sampling` is
-mandatory for MTP runs: without it, the spec impl emits "backend
-sampling requires at most one output token per sequence" repeatedly
-and the run fails (cf. `bench.sh:58` rationale comment). The CPU
-sampler burns ~94 ms total per run (per patch 6c probes) running on
-the main coordinator thread.
+Original premise: the bench flag `--no-spec-draft-backend-sampling`
+was mandatory because enabling backend sampling on the draft would
+trigger "backend sampling requires at most one output token per
+sequence" assertion failures (bench.sh:58 comment). Goal was to fix
+the underlying scheduler/sampler constraint and reclaim the ~94 ms
+sampler cost.
 
-Root cause: the MTP head emits N candidate tokens per seq in a
-single decode, but the backend sampler is wired assuming ≤1 output
-token per seq.
+Both halves of the premise broke under empirical testing:
 
-Plan:
-1. Locate where the "more than one output per seq" check lives
-   (likely `ggml-backend/sched.cpp` or `llama-sampling.cpp`).
-2. Either (a) teach the backend sampler to handle N-per-seq, or
-   (b) have `common_speculative_impl_draft_mtp` split the N
-   candidates into N separate seqs before sampling.
-3. Drop `--no-spec-draft-backend-sampling` from the bench flags and
-   rerun the patch-10 12B `n_max=8` n=500 triplicate as the
-   regression test.
+**1. The assertion no longer fires.** Quick probe on Gemma 12B with
+the flag REMOVED:
 
-Expected: +1-5% tg across all MTP archs (the ~94 ms sampler cost
-is a fixed per-run overhead, so the relative win depends on
-n_predict; bigger on longer runs). 12B's 49 s decode at n=8 would
-recover ~94 ms = +0.2%, but shorter runs benefit more
-proportionally.
+```
+$BIN -m gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --model-draft mtp-gemma-4-12B-it.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 4 \
+  -t 8 --no-mmap -fa 1 --temp 0 -n 30 \
+  -p "Hello, "
+```
 
-Risk: low. Touches sampling / scheduler, not the kernel path. The
-bench flag stays available as a fallback.
+Ran to completion. The check at `src/llama-context.cpp:1729-1750`
+guards `has_samplers && batch_inp.logits`, and the MTP draft loop
+in `common_speculative_impl_draft_mtp::draft()` (common/speculative.cpp:
+702, 709, 783) only ever flags 1 output per seq per `llama_decode`
+call. Somewhere along the recent upstream merges (likely the
+c9a10c1d8 cherry-pick or earlier) the dft-side constraint stopped
+triggering on the MTP path. The flag is a stale workaround.
+
+**2. Enabling backend sampling is slightly net-NEGATIVE on K3.**
+A/B at Gemma 12B n_max=4, -n 60:
+
+| run | tg | accept | sampling time | total |
+|---|---|---|---|---|
+| backend sampling **OFF** | 11.321 t/s | 96.154% | 166.98 ms | 12,198 ms |
+| backend sampling **ON**  | 10.855 t/s | 96.154% | 163.30 ms | 12,450 ms |
+
+Bit-identical sampling decisions (accept rate identical, sampler
+wall-clock identical within 2%). The +250 ms total cost comes from
+the additional sampling tensors in the draft graph (~3-4 ms per
+decode × 50+ decodes). The CPU sampler at `common/speculative.cpp:729`
+still runs to populate candidates for `p_min` checking — so
+attaching the backend chain doesn't elide CPU work, it just adds
+parallel work.
+
+**Achievable upper-bound win** if the CPU sampler call in draft()
+were rewired to consume candidates from `sampling.probs` /
+`sampling.candidates` instead: ~165 ms over 12.2 s decode = **+1.4%
+wall-clock**, exactly at the patch-10 noise floor (1.4% combined).
+Below the threshold worth burning code-change effort, especially
+versus the 5-15% expected wins on patches 13/14.
+
+Resolution:
+- Drop `--no-spec-draft-backend-sampling` from `bench.sh:58` (now
+  redundant — it's the default value for the param). Update the
+  comment to reflect empirical state, not the stale premise.
+- Leave the flag itself in `common/arg.cpp:3620-3627` (it's an
+  upstream-provided control, not ours to remove).
+- No code change to `common_speculative_impl_draft_mtp`.
+
+Status: closed. K3 doesn't currently benefit from draft-side backend
+sampling; revisit if backend sampler becomes cheaper-per-decode in
+a future ggml release.
 
 ## Patch 13 (queued, 2026-06-15) — Gemma 4 Assistant graph profile-then-fuse
 
