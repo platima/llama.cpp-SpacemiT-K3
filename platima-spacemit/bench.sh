@@ -31,34 +31,48 @@
 
 set -uo pipefail
 
-# ---- Variables (adjust paths to match your layout) -------------------------
-# IMPORTANT: llama-completion does NOT drive the speculative loop - it parses
-# --spec-type but never calls common_speculative_draft/_accept. With
-# --spec-type draft-mtp it silently sets cparams.n_rs_seq=4 which widens the
-# DeltaNet recurrent state 5x and tanks throughput for zero benefit. The
-# correct tool for an end-to-end MTP run is llama-speculative-simple (which
-# loads both target + drafter and runs the spec verify/accept loop). The
-# server (tools/server) is the other tool that drives spec.
-BIN="$HOME/llama-smt/build/bin/llama-completion"          # configs 1 + 2 (no MTP)
-BIN_SPEC="$HOME/llama-smt/build/bin/llama-speculative-simple"  # configs 3 + 4 (MTP)
-export LD_LIBRARY_PATH="$HOME/llama-smt/build/bin"
-MODEL="$HOME/models/unsloth-Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q4_K_M.gguf"   # MTP-headed base, self-drafts
+# ---- Paths -----------------------------------------------------------------
+# Build dir is auto-detected relative to this script (repo root / build/).
+# Model dir defaults to ~/models/unsloth-Qwen3.5-0.8B-GGUF/; both GGUFs are
+# downloaded automatically on first run if missing.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$(dirname "$SCRIPT_DIR")/build"
+
+# configs 1 + 2: llama-completion (no MTP loop, clean single-prompt exit)
+BIN="$BUILD_DIR/bin/llama-completion"
+# configs 3 + 4: llama-speculative-simple drives the full spec verify/accept loop
+BIN_SPEC="$BUILD_DIR/bin/llama-speculative-simple"
+export LD_LIBRARY_PATH="$BUILD_DIR/bin"
+
+MODEL_DIR="$HOME/models/unsloth-Qwen3.5-0.8B-GGUF"
+MODEL="$MODEL_DIR/Qwen3.5-0.8B-Q4_K_M.gguf"
+# mmproj not used in this 4-way text bench, but downloaded alongside for multimodal runs
+MMPROJ="$MODEL_DIR/mmproj-F16.gguf"
+
+# Auto-download from HuggingFace if files are missing (models are ~533 MB and ~240 MB)
+if [[ ! -f "$MODEL" ]]; then
+    echo ">>> model not found — downloading to $MODEL"
+    mkdir -p "$MODEL_DIR"
+    wget -O "$MODEL" \
+        "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf?download=true"
+fi
+if [[ ! -f "$MMPROJ" ]]; then
+    echo ">>> mmproj not found — downloading to $MMPROJ"
+    mkdir -p "$MODEL_DIR"
+    wget -O "$MMPROJ" \
+        "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf?download=true"
+fi
+
 THREADS=8
 NPRED=200
 PROMPT="Explain how RISC-V vector extensions speed up matrix multiplication."
 
-# MTP flags. --spec-type draft-mtp is the post-2026-05-13 flag name (renamed from 'mtp').
-# No --model-draft: the MTP head is part of the target model. patch 2 teaches
-# llama-speculative-simple to create the MTP draft context against the target,
-# avoiding a duplicate model load that on a 4B model blew past the K3's 16 GB RAM
-# during warmup (~15 GB observed). Mirror of tools/server/server-context.cpp.
-# Backend sampling is left at default (off). The original 'mandatory --no-' rationale
-# was stale — patch 12 (2026-06-15) found the assertion no longer fires AND that
-# enabling backend sampling on draft is net-negative on K3 (-4.1% tg, +250 ms total)
-# because the CPU sampler in common_speculative_impl_draft_mtp::draft() still runs
-# to populate candidates for p_min. Re-add --no-spec-draft-backend-sampling only if
-# you see the "backend sampling requires at most one output per sequence" error.
-MTP="--spec-type draft-mtp --spec-draft-n-max 4"
+# MTP flags. --spec-type draft-mtp is the post-2026-05-13 flag name.
+# No --model-draft: the MTP head is baked into the 0.8B GGUF, patch 2 teaches
+# llama-speculative-simple to create the draft context against the target model
+# rather than loading a second copy. --spec-draft-n-max left at the upstream
+# default (3); the sweep in TODO.md showed n=4 was uniformly worse for Qwen.
+MTP="--spec-type draft-mtp"
 
 # ---- A100 core verification helper -----------------------------------------
 # Samples per-thread last-CPU for $pid every 0.5s for ~3s, then prints a

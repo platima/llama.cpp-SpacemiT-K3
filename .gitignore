@@ -16,6 +16,7 @@
 *.lastModified
 *.log
 !platima-spacemit/results.log
+platima-spacemit/instructions*.md
 *.metallib
 *.o
 *.so
