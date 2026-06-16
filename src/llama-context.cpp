@@ -23,6 +23,13 @@
 // llama_context
 //
 
+// Thrown when a Gemma4-assistant context is created without ctx_other set.
+// This is expected during memory-fitting probes (the target context does not
+// exist yet), so it is caught and logged at DEBUG rather than ERROR level.
+struct ctx_other_required_error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     switch (ctx_type) {
         case LLAMA_CONTEXT_TYPE_DEFAULT: return LLM_GRAPH_TYPE_DEFAULT;
@@ -93,8 +100,7 @@ llama_context::llama_context(
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
         if (params.ctx_other == nullptr) {
-            // TODO: change from runtime_error to llama_exception to avoid printing error message
-            throw std::runtime_error("Gemma4Assistant requires ctx_other to be set (this is normal during memory fitting)");
+            throw ctx_other_required_error("Gemma4Assistant requires ctx_other to be set (this is normal during memory fitting)");
         }
 
         cparams.ctx_other = params.ctx_other;
@@ -3564,6 +3570,9 @@ llama_context * llama_init_from_model(
     try {
         auto * ctx = new llama_context(*model, params);
         return ctx;
+    } catch (const ctx_other_required_error & err) {
+        // Expected during memory-fitting probes; not a real failure.
+        LLAMA_LOG_DEBUG("%s: %s\n", __func__, err.what());
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: failed to initialize the context: %s\n", __func__, err.what());
     }
