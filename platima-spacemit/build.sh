@@ -38,7 +38,10 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Run everything from the repo root so cmake finds CMakeLists.txt and cmake/.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$REPO_ROOT"
 
 if [[ "${1:-}" == "clean" ]]; then
     echo ">>> removing build/"
