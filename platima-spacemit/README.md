@@ -44,8 +44,10 @@ End-to-end smoke test results are in [`TODO.md`](TODO.md) under "Functional test
 | `llama-server` | yes (already, shared with `common_speculative_draft/_accept`) |
 | `llama-cli` | yes (inherits server-context MTP wiring) |
 | `llama-speculative-simple` | yes (patches 2, 6b, 6c, 7) |
-| `llama-completion` | rejects `--spec-type` with an error (patch 8 close-out) |
+| `llama-completion` | no — rejects `--spec-type` by design (patches 8, 19) |
 | `llama-bench` | not wired |
+
+`llama-completion` has no speculative-decode loop, so the spec flags stay rejected rather than parse-and-ignore (which would silently drop them). Run MTP through `llama-cli`, which routes via the MTP-aware `server_context`.
 
 ## Probe instrumentation (patch 14)
 
@@ -92,7 +94,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–16 (patches 15 and 16 are deferred/dismissed with empirical close-out rationale). Each entry records what was tried and why it was kept or dropped.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
 
