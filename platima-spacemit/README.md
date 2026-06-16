@@ -44,8 +44,16 @@ End-to-end smoke test results are recorded in [`TODO.md`](TODO.md) under "Functi
 | `llama-server` | yes (already, shared with `common_speculative_draft/_accept`) |
 | `llama-cli` | yes (patch 8 — via shared server-context paths) |
 | `llama-speculative-simple` | yes (patches 2, 6b, 6c, 7) |
-| `llama-completion` | rejects `--spec-type` with an error (patch 8 close-out) |
+| `llama-completion` | no — rejects `--spec-type` by design (patches 8, 19) |
 | `llama-bench` | not wired |
+
+`llama-completion` uses the old-style `common_init_from_params` + hand-rolled
+autoregressive loop and has no speculative-decode path at all. Registering the
+speculative arg group on it (the patch-19 brief's original ask) would only make
+the flags *parse* — they would be silently ignored, which is the same
+looks-like-it-worked trap that patch 18 cleaned up. Rather than wire a
+parse-but-ignore flag, the spec flags stay rejected; **run MTP through
+`llama-cli`**, which already routes via the MTP-aware `server_context`.
 
 ### Probe instrumentation (patch 14)
 
@@ -80,7 +88,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14. Patch 15 (buffer-unification refactor) is deferred; patch 16 (X100 sampling threadpool) and patch 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate) are dismissed. Each entry in TODO.md records the empirical close-out rationale.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded from ERROR to DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works). Patch 15 (buffer-unification refactor) is deferred; patch 16 (X100 sampling threadpool), patch 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), and patch 19 (`llama-completion` speculative arg group — infeasible, the tool has no speculative loop; use `llama-cli`) are dismissed. Each entry in TODO.md records the empirical close-out rationale.
 
 The `--version` stamp in `common/arg.cpp` mirrors the same patch list and prints on every binary's `--version` invocation, so a runtime check tells you exactly which patches a deployed binary carries.
 

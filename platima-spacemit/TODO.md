@@ -1020,6 +1020,45 @@ only, no code change.
 Re-open the HP unlock only if a prefill-bound Q4_1 workload becomes important
 *and* someone is willing to own the m1 zp asm.
 
+## Patch 18 (DONE 2026-06-16) — downgrade benign Gemma4-assistant fit-probe log
+
+The brief (`new-instructions.md`, stage 1) claimed Gemma 4 E4B MTP via
+`llama-cli` silently falls back to non-MTP because of a `ctx_other`
+init-ordering bug, with the scary `E llama_init_from_model: failed to
+initialize the context: Gemma4Assistant requires ctx_other to be set` line as
+evidence. **Misdiagnosis — MTP already works.** Empirical repro on K3
+(`gemma-4-E4B_q4_0-it.gguf` + `mtp-gemma-4-E4B-it.gguf`, `--spec-type
+draft-mtp -t 8`): 5.4 t/s plain → 10.4 t/s MTP (~1.9×), draft acceptance
+1.0, `ctx_dft=yes`. The error is only the memory-fitting probe
+(`common_get_device_memory_data`), which *must* build the assistant context
+before the target exists, so the throw is by design.
+
+Fix (log hygiene only): added a file-scope `ctx_other_required_error` in
+`src/llama-context.cpp`, thrown at the `LLM_ARCH_GEMMA4_ASSISTANT` ctx_other
+check, and caught ahead of the generic handler in `llama_init_from_model` to
+log at `LLAMA_LOG_DEBUG` instead of `LLAMA_LOG_ERROR`. Verified: default runs
+now show no error line (only the perf line); under `-v` the line reappears at
+`D` level. No behaviour change — MTP worked before and after. Commit on
+`platima-mtmd`.
+
+## Patch 19 (DISMISSED 2026-06-16) — `llama-completion` speculative arg group
+
+The brief (stage 2) asked to register the speculative arg group on
+`llama-completion` so it accepts `--spec-type` / `--model-draft`. Infeasible
+as framed: `tools/completion/completion.cpp` uses the old-style
+`common_init_from_params` + hand-rolled autoregressive loop and has **zero**
+speculative-decode wiring (grep `speculative`/`draft` → no matches). Adding the
+arg tags would only make the flags *parse* — they would be silently ignored,
+the exact looks-like-it-worked trap patch 18 just cleaned up. Speculative
+decode lives in `server_context`, which `llama-cli` already routes through.
+
+Decision: keep `llama-completion` rejecting the spec flags; documented in
+`README.md` that MTP runs via `llama-cli`. A real port of the
+`common_speculative_*` loop into `completion.cpp` was offered as an option but
+not taken (large blast radius, no K3-specific need — `llama-cli` covers it).
+Re-open only if `llama-completion` itself must gain MTP, on its own branch for
+a clean upstream PR.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
