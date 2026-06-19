@@ -954,6 +954,9 @@ struct mtmd_tokenizer {
             // consider each mel_spec as a separate audio chunk
             // TODO: maybe support batching, but this may come with memory cost
             for (auto & mel_spec : mel_spec_chunks) {
+                // Validate dimensions fit in clip_image (uint32)
+                GGML_ASSERT(mel_spec.n_len <= INT32_MAX && mel_spec.n_len >= 0);
+                GGML_ASSERT(mel_spec.n_mel <= INT32_MAX && mel_spec.n_mel >= 0);
                 clip_image_f32_ptr mel_f32(clip_image_f32_init());
                 mel_f32->nx  = mel_spec.n_len;
                 mel_f32->ny  = mel_spec.n_mel;
