@@ -1,0 +1,13 @@
+CPU_RISCV64_SPACEMIT: tcm is available, blk_size: 393216, blk_num: 8, is_fake_tcm: 0
+CPU_RISCV64_SPACEMIT: num_cores: 16, num_perfer_cores: 8, perfer_core_arch_id: a064, exclude_main_thread: 0, use_ime1: 0, use_ime2: 1, mem_backend: HPAGE, cpu_mask: ff00, aicpu_id_offset: 8
+CPU_RISCV64_SPACEMIT: alloc_chunk: open(/dev/tcm_sync_mem) failed, errno=2
+CPU_RISCV64_SPACEMIT: failed to allocate init_barrier from shared mem, falling back to heap
+0.00.780.356 E llama_model_load: error loading model: unknown model architecture: 'gemma4-assistant'
+0.00.780.381 E llama_model_load_from_file_impl: failed to load model
+0.00.780.788 E srv    load_model: [spec] failed to measure draft model memory: failed to load model
+1.49.476.350 E llama_model_load: error loading model: unknown model architecture: 'gemma4-assistant'
+1.49.476.369 E llama_model_load_from_file_impl: failed to load model
+1.49.476.376 E srv    load_model: failed to load draft model, '/home/owner/models/unsloth-gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf'
+
+Loading model... 
+Failed to load the model

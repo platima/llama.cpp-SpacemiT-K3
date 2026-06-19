@@ -1,0 +1,10 @@
+CPU_RISCV64_SPACEMIT: tcm is available, blk_size: 393216, blk_num: 8, is_fake_tcm: 0
+CPU_RISCV64_SPACEMIT: num_cores: 16, num_perfer_cores: 8, perfer_core_arch_id: a064, exclude_main_thread: 0, use_ime1: 0, use_ime2: 1, mem_backend: HPAGE, cpu_mask: ff00, aicpu_id_offset: 8
+CPU_RISCV64_SPACEMIT: alloc_chunk: open(/dev/tcm_sync_mem) failed, errno=2
+CPU_RISCV64_SPACEMIT: failed to allocate init_barrier from shared mem, falling back to heap
+| model                          |       size |     params | backend    | threads | n_ubatch |  fa | mmap |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | -------: | --: | ---: | --------------: | -------------------: |
+| qwen35 9B Q4_K - Medium        |   5.28 GiB |     8.95 B | CPU        |       8 |      128 |   0 |    0 |           pp128 |         25.34 ± 0.12 |
+| qwen35 9B Q4_K - Medium        |   5.28 GiB |     8.95 B | CPU        |       8 |      128 |   0 |    0 |           tg128 |          4.21 ± 0.00 |
+
+build: 246e63e6f (9510)

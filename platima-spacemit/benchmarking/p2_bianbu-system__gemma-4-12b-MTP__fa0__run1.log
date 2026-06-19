@@ -1,0 +1,15 @@
+CPU_RISCV64_SPACEMIT: tcm is available, blk_size: 393216, blk_num: 8, is_fake_tcm: 0
+CPU_RISCV64_SPACEMIT: num_cores: 16, num_perfer_cores: 8, perfer_core_arch_id: a064, exclude_main_thread: 0, use_ime1: 0, use_ime2: 1, mem_backend: HPAGE, cpu_mask: ff00, aicpu_id_offset: 8
+CPU_RISCV64_SPACEMIT: alloc_chunk: open(/dev/tcm_sync_mem) failed, errno=2
+CPU_RISCV64_SPACEMIT: failed to allocate init_barrier from shared mem, falling back to heap
+error while handling argument "--spec-type": unknown speculative type: draft-mtp
+
+usage:
+--spec-type none,draft-simple,draft-eagle3,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache
+                                        comma-separated list of types of speculative decoding to use (default:
+                                        none)
+                                        
+                                        (env: LLAMA_ARG_SPEC_TYPE)
+
+
+to show complete usage, run with -h
