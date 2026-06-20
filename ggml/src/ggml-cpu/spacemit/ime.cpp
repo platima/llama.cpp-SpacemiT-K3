@@ -1640,7 +1640,13 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
             case GGML_OP_MUL:
             case GGML_OP_DIV:
             case GGML_OP_FLASH_ATTN_EXT:
-            case GGML_OP_CONT:
+            // NOTE: GGML_OP_CONT intentionally routed to generic CPU. The custom
+            // RVV transpose-cont kernel (forward_cont_with_permute ->
+            // rvv_transposed_s32_mn_to_nm) corrupts the gemma4 vision encoder's
+            // F32 ggml_cont(ggml_transpose(...)) output, producing hallucinated
+            // image descriptions. Generic ggml_compute_forward_cont is correct
+            // here; the perf cost is limited to transpose-conts (memory-bound).
+            // case GGML_OP_CONT:
             case GGML_OP_CPY:
             case GGML_OP_REPEAT:
             case GGML_OP_SUM_ROWS:

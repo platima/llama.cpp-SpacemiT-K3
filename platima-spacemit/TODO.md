@@ -1059,6 +1059,36 @@ not taken (large blast radius, no K3-specific need — `llama-cli` covers it).
 Re-open only if `llama-completion` itself must gain MTP, on its own branch for
 a clean upstream PR.
 
+## Patch 20 (DONE 2026-06-20) — Gemma 4 vision garbled output: custom CONT kernel corrupts F32 transpose-cont
+
+Gemma 4 E4B/E2B vision via `llama-mtmd-cli` produced hallucinated garbage
+("complex collage", "abstract glitch art with Devanagari script") while
+text-only generation, Gemma MTP, and Qwen 3.5 vision all worked on the
+identical build. Isolated by bisection of the SpacemiT custom RVV op
+dispatch in `ime.cpp` `get_tensor_traits`: routing **only** `GGML_OP_CONT`
+to generic CPU restores correct output ("Hi" read from `Test.png`).
+
+Root cause: the Gemma4 vision encoder runs `ggml_cont(ggml_transpose(...))`
+(`tools/mtmd/models/gemma4v.cpp`), which hits the custom transpose-cont path
+(`forward_cont_with_permute` → `rvv_transposed_s32_mn_to_nm`). That assembly
+transpose kernel corrupts the **F32** output for the vision encoder's tensor
+geometry → garbage image embeddings. Qwen vision and the LLM/text path don't
+hit the same failing geometry, which is why only Gemma vision was affected.
+
+Ruled out before landing here: missing upstream cherry-pick (E4B vision code
+== upstream), model files (x86 reads "Hi"), flash attention (`-fa 0` still
+garbled), get_rows/concat, arithmetic/norm kernels, IME2 mul_mat (q4_0,
+shared with working Qwen). A kernel-level fix to `permute_transpose_impl`
+(s16 branch) was tried and disproven — the failing cont is F32, not F16.
+
+Fix (single-line, log-clean): comment out `case GGML_OP_CONT:` in
+`get_tensor_traits` so CONT falls through to generic `ggml_compute_forward_cont`.
+Perf cost negligible — non-transpose conts already fell back to generic inside
+the custom dispatch's else branch, and IME2 mul_mat is untouched. Verified on
+K3: Gemma E4B reads "Hi" (`-fa 1` and `-fa 0`), Qwen 3.5 vision still reads
+"Hi", `use_ime2: 1` intact, MTP unaffected (vision fix doesn't touch the
+text speculative path). Commit on `platima-mtmd`.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
