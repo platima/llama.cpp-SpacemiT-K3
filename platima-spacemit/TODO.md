@@ -1089,6 +1089,44 @@ K3: Gemma E4B reads "Hi" (`-fa 1` and `-fa 0`), Qwen 3.5 vision still reads
 "Hi", `use_ime2: 1` intact, MTP unaffected (vision fix doesn't touch the
 text speculative path). Commit on `platima-mtmd`.
 
+## Patch 21 (DONE 2026-06-22) — vision encode ~24× faster: re-type bf16 mmproj weights to F16
+
+Gemma 4 vision via `llama-mtmd-cli` was painfully slow — the CLIP image encode
+alone took ~287 s (measured: `image slice encoded in 287551 ms` on E4B + Test.png).
+Root cause is NOT IME2 (the user's initial framing); it's the weight dtype. The
+Gemma 4 mmproj stores its vision mul_mat weights (`v.blk.*.{ffn_*,attn_q/k/v/out}`,
+`mm.input_projection`) as **bf16**. The SpacemiT toolchain `-march`
+(`rv64gcv_zfh_zvfh_zba_zicbop`) has vectorised F16 (`zfh`/`zvfh`) but no bf16 vector
+extension (`zvfbfwma`), so `ggml_vec_dot_bf16` (ggml-cpu/vec.cpp) falls through its
+SIMD branches to the **scalar** leftover loop — every bf16 element upcast one at a
+time. F16, by contrast, has a `__riscv_zvfh` vectorised dot path.
+
+Note this is also why IME2 can't help directly: IME2 is an int8 matrix engine
+(`ime2_kernels.cpp`: int8×int8 accumulate, all repack targets `*_q8_0`); F16/bf16
+never route to it. supports_op returns false for non-quant types by design.
+
+Fix (Tier 1, opt-in): `LLAMA_VISION_BF16_TO_F16=1`. In `tools/mtmd/clip.cpp`
+`get_tensor`, 2D bf16 weights are created as `GGML_TYPE_F16` instead of duplicated;
+the load loop reads the GGUF bf16 bytes and converts bf16→f32→f16
+(`ggml_bf16_to_fp32_row` / `ggml_fp32_to_fp16_row`) before `ggml_backend_tensor_set`.
+No buffer-type change, no quantization. Env var absent → original bf16 path.
+
+Measured (E4B, Test.png, IME2 build, --verbose):
+| weights | CLIP encode | reads image |
+|---------|-------------|-------------|
+| bf16 (default)                | 287551 ms | "Hi" ✓ |
+| F16 (`LLAMA_VISION_BF16_TO_F16=1`) | 11834 ms (**~24×**) | "Hi" ✓ |
+
+F16 has more mantissa than bf16 → near-lossless; output unchanged. Models with an
+already-F16 mmproj (Qwen 3.5) have no 2D bf16 weights, so the flag is a no-op (no
+regression). Kept opt-in for now; candidate for default-on after wider testing.
+
+Tier 2 (deferred to a branch): quantize bf16 vision weights to q8_0 and route onto
+IME2 (q8_0_32x32 kernel; dims fit ne[1]%32==0). Needs per-tensor repack-buffer
+selection in clip.cpp (currently a single default buft for all weights) plus a
+quality A/B. Extra speed over vectorised F16 may be modest — measure before
+committing the larger blast radius.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)

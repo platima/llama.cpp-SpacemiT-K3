@@ -1703,6 +1703,11 @@ struct clip_model_loader {
 
         // helper function
         std::unordered_set<std::string> loaded_tensor_names;
+        // Opt-in: re-type bf16 vision weights to F16 (see note in get_tensor below).
+        const bool bf16_to_f16 = getenv("LLAMA_VISION_BF16_TO_F16") != nullptr;
+        if (bf16_to_f16) {
+            LOG_INF("%s: LLAMA_VISION_BF16_TO_F16 set — converting 2D bf16 weights to F16\n", __func__);
+        }
         auto get_tensor = [&](const std::string & name, bool required = true) {
             // Each tensor should only be loaded once; duplicates indicate a bug
             if (loaded_tensor_names.count(name)) {
@@ -1714,7 +1719,17 @@ struct clip_model_loader {
             }
             if (cur) {
                 tensors_to_load.push_back(cur);
-                ggml_tensor * data_tensor = ggml_dup_tensor(ctx_clip.ctx_data.get(), cur);
+                ggml_tensor * data_tensor;
+                // Tier-1 vision speedup (SpacemiT K3): the build's -march has zfh/zvfh
+                // (vectorised F16) but no zvfbfwma, so bf16 mul_mat runs on a scalar
+                // path. Re-type 2D bf16 weights (the linear/mul_mat weights) to F16 at
+                // load so they hit the vectorised ggml_vec_dot_f16 RVV kernel. Data is
+                // converted bf16->f16 in the load loop below. Opt-in via env var.
+                if (bf16_to_f16 && cur->type == GGML_TYPE_BF16 && ggml_n_dims(cur) == 2) {
+                    data_tensor = ggml_new_tensor_2d(ctx_clip.ctx_data.get(), GGML_TYPE_F16, cur->ne[0], cur->ne[1]);
+                } else {
+                    data_tensor = ggml_dup_tensor(ctx_clip.ctx_data.get(), cur);
+                }
                 ggml_set_name(data_tensor, cur->name);
                 loaded_tensor_names.insert(name);
                 cur = data_tensor;
@@ -2654,6 +2669,19 @@ struct clip_model_loader {
                 fin.seekg(offset, std::ios::beg);
                 if (!fin) {
                     throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
+                }
+                // Tier-1 vision speedup: weight was re-typed bf16 -> F16 in get_tensor.
+                // The GGUF still holds bf16, so read bf16 and convert via f32 before set.
+                if (bf16_to_f16 && t->type == GGML_TYPE_BF16 && cur->type == GGML_TYPE_F16) {
+                    const int64_t n = ggml_nelements(cur);
+                    read_buf.resize((size_t) n * sizeof(ggml_bf16_t));
+                    fin.read(reinterpret_cast<char *>(read_buf.data()), read_buf.size());
+                    std::vector<float>       tmp_f32(n);
+                    std::vector<ggml_fp16_t> tmp_f16(n);
+                    ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t *>(read_buf.data()), tmp_f32.data(), n);
+                    ggml_fp32_to_fp16_row(tmp_f32.data(), tmp_f16.data(), n);
+                    ggml_backend_tensor_set(cur, tmp_f16.data(), 0, (size_t) n * sizeof(ggml_fp16_t));
+                    continue;
                 }
                 size_t num_bytes = ggml_nbytes(cur);
                 if (ggml_backend_buft_is_host(buft)) {

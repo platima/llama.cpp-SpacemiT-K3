@@ -59,6 +59,30 @@ Any future fusion patch must show ≥ 2% of decode wall-clock in the target regi
 GGML_OP_TIMING=1 llama-speculative-simple ...  2>&1 | grep -A100 GGML_OP_TIMING
 ```
 
+## Vision encode speedup (patch 21)
+
+Gemma 4 mmproj vision weights ship as **bf16**. The SpacemiT toolchain `-march`
+(`rv64gcv_zfh_zvfh_…`) has vectorised F16 (`zfh`/`zvfh`) but **no** bf16 vector
+extension (`zvfbfwma`), so `ggml_vec_dot_bf16` falls to a scalar element-by-element
+path — making the CLIP encode painfully slow.
+
+`LLAMA_VISION_BF16_TO_F16=1` re-types 2D bf16 vision weights to F16 at load (data
+converted bf16→f32→f16), routing the encoder mul_mats onto the vectorised
+`ggml_vec_dot_f16` RVV kernel. Opt-in via env var; absent = original bf16 path.
+
+Measured on Gemma 4 E4B (`Test.png`, IME2 build):
+
+| | CLIP encode | reads image |
+|---|---|---|
+| bf16 (default) | 287551 ms | "Hi" ✓ |
+| F16 (`LLAMA_VISION_BF16_TO_F16=1`) | 11834 ms (**~24×**) | "Hi" ✓ |
+
+F16 carries more mantissa than bf16, so this is near-lossless. Models whose mmproj
+is already F16 (e.g. Qwen 3.5) have no 2D bf16 weights, so the flag is a no-op there.
+
+A further IME2-int8 (`q8_0`) route is under evaluation on a branch (Tier 2) — it
+needs a per-tensor repack-buffer change in `clip.cpp` plus a quality A/B.
+
 ## Build
 
 ```bash
@@ -94,7 +118,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode ~24× faster — `LLAMA_VISION_BF16_TO_F16=1` re-types bf16 mmproj weights to vectorised F16; see above). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
 
