@@ -2793,7 +2793,7 @@ struct clip_model_loader {
         }
 
         // load data
-        if (!ctx_clip.no_alloc) {
+        {
             std::vector<uint8_t> read_buf;
 
             // alloc memory and offload data
@@ -2806,7 +2806,9 @@ struct clip_model_loader {
             }
             ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
             ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-            for (auto & t : tensors_to_load) {
+            // read the weight from file (skip when no_alloc is set, e.g. memory-usage estimation)
+            if (!ctx_clip.no_alloc) {
+              for (auto & t : tensors_to_load) {
                 ggml_tensor * cur = ggml_get_tensor(ctx_clip.ctx_data.get(), t->name);
                 if (!cur && ctx_clip.ctx_data_ime) {
                     cur = ggml_get_tensor(ctx_clip.ctx_data_ime.get(), t->name);
@@ -2856,10 +2858,12 @@ struct clip_model_loader {
                     fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
                 }
+              }
+              LOG_DBG("%s: loaded %zu tensors from %s\n", __func__, tensors_to_load.size(), fname.c_str());
+            } else {
+                LOG_DBG("%s: no_alloc is set, skipping tensor data loading (%zu tensors)\n", __func__, tensors_to_load.size());
             }
             fin.close();
-
-            LOG_DBG("%s: loaded %zu tensors from %s\n", __func__, tensors_to_load.size(), fname.c_str());
         }
 
     }
