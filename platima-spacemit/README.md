@@ -80,8 +80,20 @@ Measured on Gemma 4 E4B (`Test.png`, IME2 build):
 F16 carries more mantissa than bf16, so this is near-lossless. Models whose mmproj
 is already F16 (e.g. Qwen 3.5) have no 2D bf16 weights, so the flag is a no-op there.
 
-A further IME2-int8 (`q8_0`) route is under evaluation on a branch (Tier 2) — it
-needs a per-tensor repack-buffer change in `clip.cpp` plus a quality A/B.
+A further IME2-int8 route (`LLAMA_VISION_BF16_TO_Q8_0=1`, Tier 2) is implemented and
+tested on branch `platima-mtmd-tier2-ime2-vision`. It quantizes 2D bf16 vision weights
+to `q8_0` and places them in the spacemit repack buffer so the encoder mul_mats run on
+the IME2 int8 engine. On Gemma 4 E2B it nearly halves the already-fast F16 encode with
+no quality loss on this test:
+
+| | CLIP encode | reads image |
+|---|---|---|
+| F16 (`LLAMA_VISION_BF16_TO_F16=1`)  | 11364 ms | "Hi" ✓ |
+| q8_0 (`LLAMA_VISION_BF16_TO_Q8_0=1`) | ~5900 ms (**~1.9×**) | "Hi" ✓ |
+
+Opt-in and still under evaluation (wider models / harder images) before considering
+merge. Requires `-t 8` (the spacemit affinity path aborts above 8 threads) and `--jinja`
+for Gemma 4 — both pre-existing, unrelated to this flag.
 
 ## Build
 

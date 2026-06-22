@@ -1121,11 +1121,32 @@ F16 has more mantissa than bf16 → near-lossless; output unchanged. Models with
 already-F16 mmproj (Qwen 3.5) have no 2D bf16 weights, so the flag is a no-op (no
 regression). Kept opt-in for now; candidate for default-on after wider testing.
 
-Tier 2 (deferred to a branch): quantize bf16 vision weights to q8_0 and route onto
-IME2 (q8_0_32x32 kernel; dims fit ne[1]%32==0). Needs per-tensor repack-buffer
-selection in clip.cpp (currently a single default buft for all weights) plus a
-quality A/B. Extra speed over vectorised F16 may be modest — measure before
-committing the larger blast radius.
+Tier 2 (implemented + tested on branch `platima-mtmd-tier2-ime2-vision`, opt-in):
+`LLAMA_VISION_BF16_TO_Q8_0=1`. Quantizes 2D bf16 vision weights to `q8_0` and places
+them in the spacemit repack buffer so their mul_mats dispatch onto the IME2 int8
+engine (`q8_0_32x32_q8_0` kernel). Implementation in `tools/mtmd/clip.cpp`:
+- `clip_ctx` gains a second weight context `ctx_data_ime` + buffer `buf_ime`.
+- The `CPU_RISCV64_SPACEMIT` buffer type is located via the public proc-address API
+  (`ggml_backend_dev_get_extra_bufts`); if absent the flag is ignored (warns).
+- Eligible 2D bf16 weights with `ne[0] % 32 == 0` are created as `GGML_TYPE_Q8_0` in
+  `ctx_data_ime`; everything else stays in the default CPU context. The ime context
+  is allocated into the spacemit buft first (its `init_tensor` attaches repack traits).
+- Load loop reads GGUF bf16 → f32 → `ggml_quantize_chunk(Q8_0)` → `ggml_backend_tensor_set`
+  (the spacemit buffer's `set_tensor` repacks for IME2).
+
+Measured (E2B, Test.png, IME2 build, `--jinja -t 8`, `--verbose`):
+| weights | CLIP encode | reads image | IME2 mul_mats |
+|---------|-------------|-------------|---------------|
+| F16 (`LLAMA_VISION_BF16_TO_F16=1`)  | 11364 ms       | "Hi" ✓ | 0 |
+| q8_0 (`LLAMA_VISION_BF16_TO_Q8_0=1`)| 5891–5905 ms (**~1.9×**) | "Hi" ✓ | 114 |
+
+q8_0 keeps full quality on this test (still reads "Hi") and nearly halves the
+already-fast F16 encode. Note: this is the E2B mmproj (hidden 768); the 287551 ms
+bf16 / 11834 ms F16 figures above are E4B (hidden 1152), so compare q8_0 only to
+the **same-model** F16 (11364 ms). Two operational gotchas surfaced (both pre-existing,
+not caused by Tier 2): the spacemit thread-affinity path aborts when n_threads > 8
+(`thread_n N exceeds perfer_core_ids size 8`) — pin `-t 8`; and Gemma 4 needs `--jinja`.
+Still opt-in pending wider model + harder-image testing before considering merge.
 
 ## K3 A100 / X100 improvements observed during the merge
 

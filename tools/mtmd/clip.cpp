@@ -145,6 +145,12 @@ struct clip_ctx {
     gguf_context_ptr ctx_gguf;
     ggml_context_ptr ctx_data;
 
+    // Tier-2 vision speedup (SpacemiT K3): optional second weight context whose
+    // tensors are q8_0 and live in the spacemit repack buffer so vision mul_mats
+    // dispatch onto the IME2 int8 matrix engine. Empty unless LLAMA_VISION_BF16_TO_Q8_0.
+    ggml_context_ptr ctx_data_ime;
+    ggml_backend_buffer_ptr buf_ime;
+
     std::vector<uint8_t> buf_compute_meta;
 
     std::vector<ggml_backend_t> backend_ptrs;
@@ -1708,6 +1714,45 @@ struct clip_model_loader {
         if (bf16_to_f16) {
             LOG_INF("%s: LLAMA_VISION_BF16_TO_F16 set — converting 2D bf16 weights to F16\n", __func__);
         }
+
+        // Tier-2 opt-in (SpacemiT K3): quantise 2D bf16 vision weights to q8_0 and
+        // place them in the spacemit repack buffer so their mul_mats dispatch onto
+        // the IME2 int8 matrix engine. Requires the extra buffer type to be present;
+        // if not found we silently leave bf16_to_q8_0 off (caller can still use F16).
+        ggml_backend_buffer_type_t ime_buft = nullptr;
+        if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr) {
+            ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            if (cpu_dev) {
+                ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
+                auto get_extra_bufts_fn = (ggml_backend_dev_get_extra_bufts_t)
+                    ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_dev_get_extra_bufts");
+                if (get_extra_bufts_fn) {
+                    ggml_backend_buffer_type_t * bufts = get_extra_bufts_fn(cpu_dev);
+                    while (bufts && *bufts) {
+                        if (std::string(ggml_backend_buft_name(*bufts)) == "CPU_RISCV64_SPACEMIT") {
+                            ime_buft = *bufts;
+                            break;
+                        }
+                        ++bufts;
+                    }
+                }
+            }
+        }
+        const bool bf16_to_q8_0 = ime_buft != nullptr;
+        if (bf16_to_q8_0) {
+            LOG_INF("%s: LLAMA_VISION_BF16_TO_Q8_0 set — quantising 2D bf16 weights to q8_0 (IME2)\n", __func__);
+            ggml_init_params ime_params = {
+                /*.mem_size   =*/ static_cast<size_t>(gguf_get_n_tensors(ctx_gguf.get()) + 1) * ggml_tensor_overhead(),
+                /*.mem_buffer =*/ NULL,
+                /*.no_alloc   =*/ true,
+            };
+            ctx_clip.ctx_data_ime.reset(ggml_init(ime_params));
+            if (!ctx_clip.ctx_data_ime) {
+                throw std::runtime_error(string_format("%s: failed to init ggml ime context\n", __func__));
+            }
+        } else if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr) {
+            LOG_WRN("%s: LLAMA_VISION_BF16_TO_Q8_0 set but CPU_RISCV64_SPACEMIT buffer type not found — ignoring\n", __func__);
+        }
         auto get_tensor = [&](const std::string & name, bool required = true) {
             // Each tensor should only be loaded once; duplicates indicate a bug
             if (loaded_tensor_names.count(name)) {
@@ -1720,12 +1765,19 @@ struct clip_model_loader {
             if (cur) {
                 tensors_to_load.push_back(cur);
                 ggml_tensor * data_tensor;
+                // Tier-2 vision speedup (SpacemiT K3): quantise 2D bf16 mul_mat weights
+                // to q8_0 in the spacemit ime context so they repack onto the IME2 int8
+                // engine. q8_0 needs ne[0] % 32 == 0 (block size). Data is read bf16,
+                // converted to f32 and quantised in the load loop below.
+                if (bf16_to_q8_0 && cur->type == GGML_TYPE_BF16 && ggml_n_dims(cur) == 2 &&
+                    cur->ne[0] % 32 == 0) {
+                    data_tensor = ggml_new_tensor_2d(ctx_clip.ctx_data_ime.get(), GGML_TYPE_Q8_0, cur->ne[0], cur->ne[1]);
                 // Tier-1 vision speedup (SpacemiT K3): the build's -march has zfh/zvfh
                 // (vectorised F16) but no zvfbfwma, so bf16 mul_mat runs on a scalar
                 // path. Re-type 2D bf16 weights (the linear/mul_mat weights) to F16 at
                 // load so they hit the vectorised ggml_vec_dot_f16 RVV kernel. Data is
                 // converted bf16->f16 in the load loop below. Opt-in via env var.
-                if (bf16_to_f16 && cur->type == GGML_TYPE_BF16 && ggml_n_dims(cur) == 2) {
+                } else if (bf16_to_f16 && cur->type == GGML_TYPE_BF16 && ggml_n_dims(cur) == 2) {
                     data_tensor = ggml_new_tensor_2d(ctx_clip.ctx_data.get(), GGML_TYPE_F16, cur->ne[0], cur->ne[1]);
                 } else {
                     data_tensor = ggml_dup_tensor(ctx_clip.ctx_data.get(), cur);
@@ -2658,10 +2710,19 @@ struct clip_model_loader {
 
             // alloc memory and offload data
             ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(ctx_clip.backend);
+            // Tier-2: allocate the q8_0/IME context into the spacemit repack buffer
+            // first. Its init_tensor attaches the repack traits used at set_tensor.
+            if (ctx_clip.ctx_data_ime && ggml_get_first_tensor(ctx_clip.ctx_data_ime.get())) {
+                ctx_clip.buf_ime.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data_ime.get(), ime_buft));
+                ggml_backend_buffer_set_usage(ctx_clip.buf_ime.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            }
             ctx_clip.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx_clip.ctx_data.get(), buft));
             ggml_backend_buffer_set_usage(ctx_clip.buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
             for (auto & t : tensors_to_load) {
                 ggml_tensor * cur = ggml_get_tensor(ctx_clip.ctx_data.get(), t->name);
+                if (!cur && ctx_clip.ctx_data_ime) {
+                    cur = ggml_get_tensor(ctx_clip.ctx_data_ime.get(), t->name);
+                }
                 GGML_ASSERT(cur && "tensor not found in ctx_data");
                 auto it_off = tensor_offset.find(t->name);
                 GGML_ASSERT(it_off != tensor_offset.end() && "no offset for tensor");
@@ -2669,6 +2730,20 @@ struct clip_model_loader {
                 fin.seekg(offset, std::ios::beg);
                 if (!fin) {
                     throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
+                }
+                // Tier-2 vision speedup: weight was re-typed bf16 -> q8_0 in get_tensor.
+                // Read bf16, convert via f32, quantise to q8_0, then set (the spacemit
+                // buffer's set_tensor repacks it for IME2).
+                if (bf16_to_q8_0 && t->type == GGML_TYPE_BF16 && cur->type == GGML_TYPE_Q8_0) {
+                    const int64_t n = ggml_nelements(cur);
+                    read_buf.resize((size_t) n * sizeof(ggml_bf16_t));
+                    fin.read(reinterpret_cast<char *>(read_buf.data()), read_buf.size());
+                    std::vector<float>   tmp_f32(n);
+                    std::vector<uint8_t> tmp_q8(ggml_nbytes(cur));
+                    ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t *>(read_buf.data()), tmp_f32.data(), n);
+                    ggml_quantize_chunk(GGML_TYPE_Q8_0, tmp_f32.data(), tmp_q8.data(), 0, cur->ne[1], cur->ne[0], nullptr);
+                    ggml_backend_tensor_set(cur, tmp_q8.data(), 0, tmp_q8.size());
+                    continue;
                 }
                 // Tier-1 vision speedup: weight was re-typed bf16 -> F16 in get_tensor.
                 // The GGUF still holds bf16, so read bf16 and convert via f32 before set.
