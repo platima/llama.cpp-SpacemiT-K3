@@ -1158,7 +1158,44 @@ q8_0 holds quality on the complex image too — its description is as detailed a
 correct as F16/bf16 (all three identify the man, overalls, drill, workshop and the
 ceiling ductwork/AC). The ~2× speed advantage over F16 is consistent with Test.png.
 
-Still opt-in pending wider model testing before considering merge.
+### Auto-gating on CPU capability (replaces the bare opt-in flags)
+
+Both tiers now self-gate so the K3 default needs no env var, while staying portable
+and a no-op on non-K3 / non-bf16-mmproj builds:
+
+- **New ggml predicate** `ggml_cpu_vec_dot_is_simd(enum ggml_type)` — declared in
+  `ggml/include/ggml-cpu.h`, defined in `ggml/src/ggml-cpu/vec.cpp`. It returns 1 if
+  this build's `ggml_vec_dot_<type>` uses a SIMD path, 0 if scalar, by mirroring the
+  exact per-type `#if` guards inside `ggml_vec_dot_f16`/`_bf16`/`_f32` (kept in sync
+  by a comment on both sides). This is the clean upstream-shaped hook: mtmd asks "is
+  bf16 slow here?" instead of hardcoding `-march` macros.
+- **Tier 1 auto** = `is_simd(F16) && !is_simd(BF16)`. True on the K3 `-march`
+  (zvfh, no zvfbfwma); false on x86/ARM where bf16 vectorizes by upconverting to f32,
+  so the retype correctly stays off there.
+- **Tier 2 auto** = locate `CPU_RISCV64_SPACEMIT` buft, then *probe* that a small q8_0
+  tensor actually repacks onto it (`tensor->extra != nullptr` after alloc) — confirms
+  the IME2 int8 engine is live without needing the unexported `use_ime2` flag.
+- **Env overrides** `LLAMA_VISION_BF16_TO_F16` / `_Q8_0`: unset = auto; `0`/`false`/`off`
+  = force off; any other value = force on.
+
+`clip.cpp` now `#include "ggml-cpu.h"`. The buft lookup runs unconditionally (no longer
+guarded by the env var), and a tri-state env helper resolves the final tier booleans.
+
+Re-tested the full matrix with **no env vars** (auto path), `Test.png` + `Test3.jpg`:
+
+| model | mmproj | Test.png | Test3.jpg | vision→IME2 | gates fired (auto) | result |
+|-------|--------|----------|-----------|-------------|--------------------|--------|
+| Gemma 4 E2B | bf16 | 5895 ms | 5514 ms | 112 | Tier 1 + Tier 2 | accurate (workshop, ductwork, toolbox) |
+| Gemma 4 E4B | bf16 | 5893 ms | 5474 ms | 112 | Tier 1 + Tier 2 | accurate (HVAC, glass partition, yellow drill) |
+| Qwen 3.5 0.8B | F16 | 501 ms | 21556 ms | 0 | none apply (no bf16) | accurate; also caught the Vecteezy watermark |
+
+Auto-detect engaged Tier 2 on both Gemmas with zero flags and left Qwen's f16 mmproj on
+the f16/RVV path (0 vision tensors rerouted) — the no-regression case. The Vecteezy
+watermark is caught only by Qwen; Gemma misses it across *all* tiers including
+unquantized bf16, so it's a model ceiling, not a q8_0 artifact. Runner:
+`platima-spacemit/run_vision_matrix.sh`.
+
+Still on branch `platima-mtmd-tier2-ime2-vision` pending the user's merge decision.
 
 ## K3 A100 / X100 improvements observed during the merge
 

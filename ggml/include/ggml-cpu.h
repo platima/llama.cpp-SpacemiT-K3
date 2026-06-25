@@ -108,6 +108,12 @@ extern "C" {
     GGML_BACKEND_API int ggml_cpu_has_wasm_simd  (void);
     GGML_BACKEND_API int ggml_cpu_has_llamafile  (void);
 
+    // Returns 1 if this build's ggml_vec_dot_<type> uses a SIMD-vectorized path
+    // for the given type, 0 if it falls back to a scalar element loop. Lets callers
+    // pick a faster-on-this-arch storage type (e.g. retype bf16->f16 when bf16 is
+    // scalar but f16 is vectorized) without hardcoding arch macros.
+    GGML_BACKEND_API int ggml_cpu_vec_dot_is_simd(enum ggml_type type);
+
     // Internal types and functions exposed for tests and benchmarks
 
     typedef void (*ggml_vec_dot_t)  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx,

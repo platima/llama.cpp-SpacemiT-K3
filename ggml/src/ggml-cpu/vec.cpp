@@ -8,6 +8,36 @@ ggml_fp16_t ggml_table_gelu_f16[1 << 16];
 // precomputed quick gelu table for f16 (128 KB)
 ggml_fp16_t ggml_table_gelu_quick_f16[1 << 16];
 
+// Mirrors the per-type SIMD guards in ggml_vec_dot_f16 / ggml_vec_dot_bf16 below.
+// Keep these conditions in sync with those functions.
+int ggml_cpu_vec_dot_is_simd(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_F16:
+            // f16: scalar on riscv vector without zvfh; vectorized otherwise under GGML_SIMD
+#if defined(GGML_SIMD) && !(defined(__riscv_v_intrinsic) && !defined(__riscv_zvfh))
+            return 1;
+#else
+            return 0;
+#endif
+        case GGML_TYPE_BF16:
+#if defined(__AVX512BF16__) || defined(__AVX512F__) || defined(__AVX2__) || defined(__AVX__) || \
+    (defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfwma)) || defined(__POWER9_VECTOR__) || \
+    defined(__VXE__) || defined(__VXE2__)
+            return 1;
+#else
+            return 0;
+#endif
+        case GGML_TYPE_F32:
+#if defined(GGML_SIMD)
+            return 1;
+#else
+            return 0;
+#endif
+        default:
+            return 0;
+    }
+}
+
 void ggml_vec_dot_f32(int n, float * GGML_RESTRICT s, size_t bs, const float * GGML_RESTRICT x, size_t bx, const float * GGML_RESTRICT y, size_t by, int nrc) {
    assert(nrc == 1);
    GGML_UNUSED(nrc);

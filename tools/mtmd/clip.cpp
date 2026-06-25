@@ -5,6 +5,7 @@
 #include "models/models.h"
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include "ggml-cpp.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -1709,18 +1710,34 @@ struct clip_model_loader {
 
         // helper function
         std::unordered_set<std::string> loaded_tensor_names;
-        // Opt-in: re-type bf16 vision weights to F16 (see note in get_tensor below).
-        const bool bf16_to_f16 = getenv("LLAMA_VISION_BF16_TO_F16") != nullptr;
+
+        // Env override helper: unset => auto (use detected default); "0"/"false"/"off"
+        // => force off; anything else => force on.
+        auto env_tristate = [](const char * name, bool auto_default) -> bool {
+            const char * v = getenv(name);
+            if (v == nullptr) return auto_default;
+            std::string s = v;
+            return !(s == "0" || s == "false" || s == "off");
+        };
+
+        // Tier-1 (portable): re-type 2D bf16 vision weights to F16 when this build's
+        // ggml_vec_dot is vectorized for F16 but scalar for bf16 (e.g. RISC-V with
+        // zvfh but no zvfbfwma). Auto-detected via the ggml predicate; override with
+        // LLAMA_VISION_BF16_TO_F16=0/1.
+        const bool f16_faster_than_bf16 =
+            ggml_cpu_vec_dot_is_simd(GGML_TYPE_F16) && !ggml_cpu_vec_dot_is_simd(GGML_TYPE_BF16);
+        const bool bf16_to_f16 = env_tristate("LLAMA_VISION_BF16_TO_F16", f16_faster_than_bf16);
         if (bf16_to_f16) {
-            LOG_INF("%s: LLAMA_VISION_BF16_TO_F16 set — converting 2D bf16 weights to F16\n", __func__);
+            LOG_INF("%s: converting 2D bf16 vision weights to F16 (f16 vectorized, bf16 scalar)\n", __func__);
         }
 
-        // Tier-2 opt-in (SpacemiT K3): quantise 2D bf16 vision weights to q8_0 and
-        // place them in the spacemit repack buffer so their mul_mats dispatch onto
-        // the IME2 int8 matrix engine. Requires the extra buffer type to be present;
-        // if not found we silently leave bf16_to_q8_0 off (caller can still use F16).
+        // Tier-2 (SpacemiT K3 IME2): quantise 2D bf16 vision weights to q8_0 and place
+        // them in the spacemit repack buffer so their mul_mats dispatch onto the IME2
+        // int8 matrix engine. Auto-detected by locating the CPU_RISCV64_SPACEMIT extra
+        // buffer type and probing that a q8_0 tensor actually repacks there (->extra set
+        // after alloc). Override with LLAMA_VISION_BF16_TO_Q8_0=0/1.
         ggml_backend_buffer_type_t ime_buft = nullptr;
-        if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr) {
+        {
             ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
             if (cpu_dev) {
                 ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -1738,9 +1755,28 @@ struct clip_model_loader {
                 }
             }
         }
-        const bool bf16_to_q8_0 = ime_buft != nullptr;
+        // Probe: does a small q8_0 tensor actually repack onto the ime buft? (Confirms
+        // the IME2 int8 engine is live, since use_ime2 isn't externally exported.)
+        bool ime_repacks_q8_0 = false;
+        if (ime_buft != nullptr) {
+            ggml_init_params probe_params = {
+                /*.mem_size   =*/ 2 * ggml_tensor_overhead(),
+                /*.mem_buffer =*/ NULL,
+                /*.no_alloc   =*/ true,
+            };
+            ggml_context_ptr probe_ctx(ggml_init(probe_params));
+            if (probe_ctx) {
+                ggml_tensor * probe = ggml_new_tensor_2d(probe_ctx.get(), GGML_TYPE_Q8_0, 64, 64);
+                ggml_backend_buffer_ptr probe_buf(
+                    ggml_backend_alloc_ctx_tensors_from_buft(probe_ctx.get(), ime_buft));
+                if (probe_buf && probe->extra != nullptr) {
+                    ime_repacks_q8_0 = true;
+                }
+            }
+        }
+        const bool bf16_to_q8_0 = env_tristate("LLAMA_VISION_BF16_TO_Q8_0", ime_repacks_q8_0) && ime_buft != nullptr;
         if (bf16_to_q8_0) {
-            LOG_INF("%s: LLAMA_VISION_BF16_TO_Q8_0 set — quantising 2D bf16 weights to q8_0 (IME2)\n", __func__);
+            LOG_INF("%s: quantising 2D bf16 vision weights to q8_0 for IME2 int8 engine\n", __func__);
             ggml_init_params ime_params = {
                 /*.mem_size   =*/ static_cast<size_t>(gguf_get_n_tensors(ctx_gguf.get()) + 1) * ggml_tensor_overhead(),
                 /*.mem_buffer =*/ NULL,
@@ -1750,7 +1786,7 @@ struct clip_model_loader {
             if (!ctx_clip.ctx_data_ime) {
                 throw std::runtime_error(string_format("%s: failed to init ggml ime context\n", __func__));
             }
-        } else if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr) {
+        } else if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr && ime_buft == nullptr) {
             LOG_WRN("%s: LLAMA_VISION_BF16_TO_Q8_0 set but CPU_RISCV64_SPACEMIT buffer type not found — ignoring\n", __func__);
         }
         auto get_tensor = [&](const std::string & name, bool required = true) {

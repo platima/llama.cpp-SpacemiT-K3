@@ -66,34 +66,61 @@ Gemma 4 mmproj vision weights ship as **bf16**. The SpacemiT toolchain `-march`
 extension (`zvfbfwma`), so `ggml_vec_dot_bf16` falls to a scalar element-by-element
 path — making the CLIP encode painfully slow.
 
-`LLAMA_VISION_BF16_TO_F16=1` re-types 2D bf16 vision weights to F16 at load (data
-converted bf16→f32→f16), routing the encoder mul_mats onto the vectorised
-`ggml_vec_dot_f16` RVV kernel. Opt-in via env var; absent = original bf16 path.
+**Tier 1 — bf16→F16 (portable).** Re-types 2D bf16 vision weights to F16 at load
+(data converted bf16→f32→f16), routing the encoder mul_mats onto the vectorised
+`ggml_vec_dot_f16` RVV kernel.
 
-Measured on Gemma 4 E4B (`Test.png`, IME2 build):
+**Tier 2 — bf16→q8_0 (SpacemiT K3 IME2).** Quantizes 2D bf16 vision weights to `q8_0`
+and places them in the spacemit repack buffer so the encoder mul_mats dispatch onto the
+IME2 int8 matrix engine. Takes precedence over Tier 1 for the bf16 2D weights it can
+handle (`ne[0] % 32 == 0`); Tier 1 still covers any that don't fit the q8_0 block size.
+
+### Auto-gating (no flags needed)
+
+Both tiers self-gate on CPU capability — no env var required:
+
+- **Tier 1** keys off a new ggml predicate, `ggml_cpu_vec_dot_is_simd(enum ggml_type)`
+  (declared in `ggml-cpu.h`, defined in `vec.cpp`). It mirrors the per-type SIMD
+  guards inside `ggml_vec_dot_f16`/`_bf16`. Tier 1 enables when F16 is vectorized but
+  bf16 is scalar (true on the K3 `-march`; false on x86/ARM where bf16 upconverts to
+  vectorised f32, so the retype correctly stays off there). This is portable, not a
+  hardcoded arch check.
+- **Tier 2** locates the `CPU_RISCV64_SPACEMIT` extra buffer type and probes that a
+  small q8_0 tensor actually repacks onto it (`tensor->extra` set after alloc),
+  confirming the IME2 int8 engine is live. (`use_ime2` isn't externally exported, hence
+  the probe.)
+
+Override with `LLAMA_VISION_BF16_TO_F16` / `LLAMA_VISION_BF16_TO_Q8_0` set to
+`0`/`false`/`off` to force a tier off, or any other value to force it on. Models whose
+mmproj is already F16 (e.g. Qwen 3.5) have no 2D bf16 weights, so both tiers are a no-op
+there (verified: 0 vision tensors rerouted, encoder stays on the f16/RVV path).
+
+### Measured (IME2 build, auto-gated, `-t 8 --jinja`)
+
+Gemma 4 E4B, `Test.png`, across the manual tier flags:
 
 | | CLIP encode | reads image |
 |---|---|---|
-| bf16 (default) | 287551 ms | "Hi" ✓ |
-| F16 (`LLAMA_VISION_BF16_TO_F16=1`) | 11834 ms (**~24×**) | "Hi" ✓ |
+| bf16 (Tier 1 & 2 forced off) | 287551 ms | "Hi" ✓ |
+| F16 (Tier 1) | 11834 ms (**~24×**) | "Hi" ✓ |
+| q8_0 (Tier 2, = auto-gated default on K3) | ~5900 ms (**~1.9× over F16**) | "Hi" ✓ |
 
-F16 carries more mantissa than bf16, so this is near-lossless. Models whose mmproj
-is already F16 (e.g. Qwen 3.5) have no 2D bf16 weights, so the flag is a no-op there.
+Auto-gated test matrix, `Test.png` / `Test3.jpg` (larger, complex workshop scene):
 
-A further IME2-int8 route (`LLAMA_VISION_BF16_TO_Q8_0=1`, Tier 2) is implemented and
-tested on branch `platima-mtmd-tier2-ime2-vision`. It quantizes 2D bf16 vision weights
-to `q8_0` and places them in the spacemit repack buffer so the encoder mul_mats run on
-the IME2 int8 engine. On Gemma 4 E2B it nearly halves the already-fast F16 encode with
-no quality loss on this test:
+| Model | mmproj | Test.png | Test3.jpg | vision→IME2 | result |
+|---|---|---|---|---|---|
+| Gemma 4 E2B | bf16 | 5895 ms | 5514 ms | 112 tensors | accurate (workshop, ductwork, toolbox) |
+| Gemma 4 E4B | bf16 | 5893 ms | 5474 ms | 112 tensors | accurate (HVAC, glass partition, yellow drill) |
+| Qwen 3.5 0.8B | F16 | 501 ms | 21556 ms | 0 (f16 path) | accurate, also caught the Vecteezy watermark |
 
-| | CLIP encode | reads image |
-|---|---|---|
-| F16 (`LLAMA_VISION_BF16_TO_F16=1`)  | 11364 ms | "Hi" ✓ |
-| q8_0 (`LLAMA_VISION_BF16_TO_Q8_0=1`) | ~5900 ms (**~1.9×**) | "Hi" ✓ |
+q8_0 quantization did not regress Gemma description quality. The Vecteezy watermark is
+caught only by Qwen — a model-capability difference (Gemma misses it across *all* tiers,
+including unquantized bf16), not a quantization artifact. F16 carries more mantissa than
+bf16, so Tier 1 is near-lossless; Tier 2 q8_0 held quality on these tests.
 
-Opt-in and still under evaluation (wider models / harder images) before considering
-merge. Requires `-t 8` (the spacemit affinity path aborts above 8 threads) and `--jinja`
-for Gemma 4 — both pre-existing, unrelated to this flag.
+Implemented on branch `platima-mtmd-tier2-ime2-vision`. Requires `-t 8` (the spacemit
+affinity path aborts above 8 threads) and `--jinja` for Gemma 4 — both pre-existing,
+unrelated to these tiers.
 
 ## Build
 
@@ -130,7 +157,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode ~24× faster — `LLAMA_VISION_BF16_TO_F16=1` re-types bf16 mmproj weights to vectorised F16; see above). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster — bf16 mmproj weights re-typed/quantized for the vectorised F16 or IME2-int8 path; Tier 1 bf16→F16 ~24×, Tier 2 bf16→q8_0 a further ~1.9×; now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
 
