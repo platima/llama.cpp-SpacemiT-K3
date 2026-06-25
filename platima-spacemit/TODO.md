@@ -1146,7 +1146,19 @@ bf16 / 11834 ms F16 figures above are E4B (hidden 1152), so compare q8_0 only to
 the **same-model** F16 (11364 ms). Two operational gotchas surfaced (both pre-existing,
 not caused by Tier 2): the spacemit thread-affinity path aborts when n_threads > 8
 (`thread_n N exceeds perfer_core_ids size 8`) — pin `-t 8`; and Gemma 4 needs `--jinja`.
-Still opt-in pending wider model + harder-image testing before considering merge.
+Harder-image check (E2B, `Test3.jpg` — a complex 1470×980 workshop photo: man in
+overalls holding a drill, wall AC unit, ductwork, open toolbox), full 3-way A/B:
+| weights | CLIP encode | description quality |
+|---------|-------------|---------------------|
+| bf16 (default)                       | 274135 ms                | accurate (man, drill, overalls, workshop) |
+| F16 (`LLAMA_VISION_BF16_TO_F16=1`)   | 11080 ms (**~24.7×**)    | accurate + detailed (glass reflection, ducts) |
+| q8_0 (`LLAMA_VISION_BF16_TO_Q8_0=1`) | 5499 ms (**~49.9×** bf16, **~2.0×** F16) | accurate + detailed (HVAC, ductwork, overalls) |
+
+q8_0 holds quality on the complex image too — its description is as detailed and
+correct as F16/bf16 (all three identify the man, overalls, drill, workshop and the
+ceiling ductwork/AC). The ~2× speed advantage over F16 is consistent with Test.png.
+
+Still opt-in pending wider model testing before considering merge.
 
 ## K3 A100 / X100 improvements observed during the merge
 
