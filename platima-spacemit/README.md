@@ -164,6 +164,7 @@ The `--version` stamp in `common/arg.cpp` prints the current patch level so a ru
 ## Known issues
 
 - `CPU_RISCV64_SPACEMIT: open(/dev/tcm_sync_mem) failed, errno=2` at startup. Expected on stock K3 firmware — `/dev/tcm_sync_mem` is a cross-core barrier-synchronisation device absent from the shipped kernel. The heap fallback is functionally correct and the log line is intentionally loud so any regression in the fallback stays visible.
+- **Heap-fallback barrier is not crash-safe (`ime.cpp:1747: wait tcm buffer failed`).** When `/dev/tcm_sync_mem` is absent, the backend falls back to a shared-memory barrier at `/dev/shm/tcm_sync_standalone`. If a spacemit process aborts (or is killed) mid-barrier, it leaves that file in a wedged state, and **every subsequent run then aborts** at `ime.cpp:1747` across all 8 A100 cores — regardless of model size (a 0.8B model that ran fine will start crashing too). Larger graphs (e.g. 9B text models) appear more likely to trip the initial failure, especially under sustained back-to-back loads. Recovery: clear the stale file with `sudo rm /dev/shm/tcm_sync_standalone` (it is root-owned in a sticky dir, so a non-root user cannot remove it) or reboot. This is pre-existing backend behaviour, unrelated to the vision tiers, but worth knowing before a long benchmark batch.
 - `version: 9481 (161be67d6)` (the upstream-style stamp) reports the local cherry-pick tip, not an upstream commit. The fork-specific `--version` lines print the upstream base (`354ebac8c`) separately to disambiguate.
 
 ## Relationship to upstream
