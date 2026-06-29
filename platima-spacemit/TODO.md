@@ -1239,29 +1239,40 @@ canvas — both fix the read on K3. Upstream's mitigation (`set_limit_image_toke
 clip.cpp ~1416) is already in our fork. Don't chase this in our kernels.
 
 All diagnostic edits were reverted; tree is clean. Merged into `platima-mtmd`
-(fast-forward) as patch 23; `PLATIMA_FORK_PATCH` bumped to 23. A follow-up (proposed)
-upscales sub-threshold images in preprocessing for the gemma4uv-on-RISC-V case so the
-read is robust without manual padding — see "Patch 24 (proposed)" below.
+(fast-forward) as patch 23; `PLATIMA_FORK_PATCH` bumped to 23. The tiny-image misread was
+investigated as a candidate patch 24 (auto-upscale) and the upscale approach was
+**empirically rejected** — see below. Outcome: document-only, no code.
 
-## Patch 24 (PROPOSED 2026-06-29) — upscale sub-threshold images for gemma4uv on RISC-V
+## Patch 24 (INVESTIGATED → DOCUMENT-ONLY 2026-06-29) — tiny-image misread is composition, not resolution
 
-Targeted robustness fix for the patch-23 tiny-image misread. Since the misread is
-gemma4uv-specific AND RISC-V-numerics-specific (x86 reads tiny images fine; other
-projectors unaffected), the mitigation is scoped to exactly that intersection:
+Tested the hypothesis that auto-upscaling sub-threshold images would fix the patch-23
+gemma4uv tiny-image misread. **It does not.** Sweep on the 12B (`UD-Q4_K_XL` +
+`mmproj-BF16`, `-t 8 --jinja`) over bicubic-upscaled `Test.png` (236×214 "Hi"):
 
-- **Gate:** RISC-V build (`__riscv` / spacemit CPU) **and** projector == `gemma4uv`.
-  x86 and all non-gemma4uv projectors keep byte-identical behaviour (no-op).
-- **Action:** in clip preprocessing, if the input is below the empirically-determined
-  minimum reliable size, scale it up to that size before patching. (Open question to
-  settle by test: upscale the *content* vs. *pad* into a larger canvas. Padding is the
-  already-proven fix on K3; upscaling is the user's preferred shape and is untested —
-  pick whichever the size sweep shows reads reliably with the fewest added tokens.)
+| input | image tokens (scales with size) | 12B reads |
+|-------|----------------------------------|-----------|
+| orig 236×214 (full-frame)        | ~179 | ✗ "dark vertical rectangles, washed out, zoomed-in part of a larger image" |
+| bicubic 256²                     | ~179 | ✗ "faint blurry greyish shapes" |
+| bicubic 384²                     | ~194 | ✗ "black/dark grey shapes" |
+| bicubic 512² (near the 280 cap)  | ~251 | ✗ "three vertical-ish shapes, thin wide strip, corrupted piece" |
+| **white-pad 512² (Hi centered, original glyph scale)** | — | **✓ "the letters 'H' and 'i'… The text is 'Hi'"** |
 
-**Prerequisite (do first):** size sweep on the 12B model to find the minimum input
-dimensions that read the "Hi" test reliably on K3 (and confirm a couple of other tiny
-inputs), respecting the existing `set_limit_image_tokens(40,280)` token bounds. The
-threshold from that sweep becomes the upscale target. Sweep is slow (12B encode per run)
-and TCM-poisoning-prone, so `rm -f /dev/shm/tcm_sync_standalone` between runs.
+Token count scaled with input size as `set_limit_image_tokens(40,280)` predicts, but
+**perception never improved** — resolution is not the lever. The fix is **spatial
+composition**: bicubic upscaling preserves the original full-frame framing (glyphs fill
+the canvas, no margin), which is the out-of-distribution condition; padding shrinks the
+glyphs into a whitespace margin, matching how text appears in the model's training photos,
+and the read flips to correct. (This is why an earlier ad-hoc "pad fixes it" note held
+while upscaling fails.)
+
+**Decision (per user): document-only, no code.** A general auto-pad is awkward — blindly
+padding arbitrary inputs onto white distorts non-text / non-white-background images, and
+the trigger condition (a tiny full-frame glyph image) is a synthetic edge case; real
+photos and screenshots carry their own margins. Mitigation stays manual: if you must read
+a tiny full-frame text image on K3, center it on a larger canvas with margin (NOT a
+plain upscale). Repro scripts: `platima-spacemit/run_gemma4uv_size_sweep.sh` (+ the
+ad-hoc `/tmp/vsweep/confirm.sh` pattern). Sweep is slow and TCM-poisoning-prone, so
+`rm -f /dev/shm/tcm_sync_standalone` between runs.
 
 ## K3 A100 / X100 improvements observed during the merge
 

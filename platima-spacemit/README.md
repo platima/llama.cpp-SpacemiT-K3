@@ -66,10 +66,20 @@ vectorised FP (RVV reduction order/rounding vs x86 AVX; no fast-math flag involv
 only bites because upstream itself documents this encoder-free model as performing "quite
 poor with small images" — tiny low-information inputs sit on its decision boundary and
 sub-ulp numeric noise tips the read. **Normal images work fine** (`Test3.jpg` reads
-correctly: "a laboratory… a person"). Mitigations: use normal-sized images, or pad small
-ones into a larger white canvas (more tokens/margin, more in-distribution) — both fix the
-read on K3. Upstream's own mitigation (`set_limit_image_tokens(40,280)`, `clip.cpp`) is
-already in our fork.
+correctly: "a laboratory… a person").
+
+**The lever is spatial composition, not resolution (measured, patch-24 investigation).**
+Bicubic-upscaling the tiny "Hi" to 256²/384²/512² does **not** fix the read — token count
+scales with size (`set_limit_image_tokens(40,280)`) but the 12B still perceives "vertical
+shapes / a thin strip" at every size. What *does* fix it is **padding** the small image
+onto a larger canvas so the glyphs occupy a margin of whitespace (matching how text
+appears in training photos): the read flips to a correct "Hi". So the mitigation is
+*center-on-canvas-with-margin*, not a plain upscale. We chose **document-only** (no code):
+a general auto-pad would distort non-text / non-white-background inputs, and the failure
+condition (a tiny full-frame glyph image) is a synthetic edge case — real photos and
+screenshots carry their own margins. Upstream's own mitigation
+(`set_limit_image_tokens(40,280)`, `clip.cpp`) is already in our fork. Repro:
+`platima-spacemit/run_gemma4uv_size_sweep.sh`.
 
 ### Tool MTP awareness
 
