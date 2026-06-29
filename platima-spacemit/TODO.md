@@ -1197,6 +1197,51 @@ unquantized bf16, so it's a model ceiling, not a q8_0 artifact. Runner:
 
 Still on branch `platima-mtmd-tier2-ime2-vision` pending the user's merge decision.
 
+## Gemma 4 12B Unified vision (`gemma4uv`) — upstream #24077 cherry-pick (branch `platima-mtmd-gemma4uv`)
+
+The 12B QAT "Unified" model (`unsloth-gemma-4-12B-it-qat-GGUF`) uses an **encoder-free**
+projector — `gemma4uv` (vision) / `gemma4ua` (audio): raw patches → conv `patch_embd` →
+position embeddings → a single `mm.input_projection` linear → straight into the decoder
+(`n_layer=0`). Its 11-tensor / 175 MB mmproj is *complete*, not truncated; `patch_size`
+is 48 by design (file's 16 × n_merge 3, merge folded into the conv; verified against
+`v.patch_embd.weight` shape `[6912,3840]` = 48×48×3).
+
+**Why it failed before:** our fork was ~2 months behind (newest gemma4 mtmd commit
+`63f8fe0ef`, 2026-04-02), so it threw `unknown projector type: gemma4uv`. The runtime fix
+is upstream `a731805ce` *"mtmd, model: allow skip build_vit() (#24077)"* (~2026-06-03) —
+**not** the widely-cited PR #24118, which only touches `conversion/gemma.py`. Cherry-picked
+`a731805ce -x` onto `platima-mtmd-gemma4uv` (off `platima-mtmd-tier2-ime2-vision`); 3 small
+conflicts (conversion/__init__.py, conversion/gemma.py kept-HEAD; mtmd-audio.h kept-both).
+Builds clean; 12B encodes a normal image in ~55 ms. Graph reimplemented in
+`tools/mtmd/models/gemma4uv.cpp`.
+
+**Tiny-image misread — DIAGNOSED, NOT a port bug.** The 12B misreads a tiny 236×214 "Hi"
+test image (sees a "narrow strip / bottles"); x86 upstream reads "Hi" correctly. Exhaustive
+K3 bisection ruled OUT every fork-specific cause:
+- not a threading race (`-t 1` == `-t 8`, byte-identical);
+- not `ggml_im2col` (plain scalar C, identical to x86);
+- not our SpacemiT RVV vision kernels — routed the WHOLE vision encode
+  (NORM/ADD/MUL/GET_ROWS/CONCAT/CPY) to generic ggml-cpu → still misreads;
+- not f16 matmul precision (forced patch + input projection to f32 → still misreads);
+- not the IME2 decoder — disabled IME mul_mat so the entire 12B ran generic Q4_K → still
+  misreads;
+- not preprocessing/geometry/layout — dumped the preprocessed tensor and rendered it: a
+  PERFECT clean "Hi", correct 336×336 / 7×7 grid (pos_w=pos_h=7), correct HWC→planar
+  de-interleave (clip.cpp ~3654). Gemma uses image_mean=0/std=1 (identity norm).
+
+CONCLUSION: the only K3-vs-x86 difference left is inherent RISC-V vectorised FP (RVV
+reduction order/rounding vs x86 AVX; no fast-math flag involved). It only bites because
+upstream itself documents this encoder-free unified model as "performs quite poor with
+small images" — tiny low-information inputs sit on its decision boundary and sub-ulp
+numeric noise tips the read. NORMAL images work fine (`Test3.jpg`: "a laboratory… a
+person"). Mitigations: use normal-sized images, or pad small ones into a larger white
+canvas — both fix the read on K3. Upstream's mitigation (`set_limit_image_tokens(40,280)`,
+clip.cpp ~1416) is already in our fork. Don't chase this in our kernels.
+
+All diagnostic edits were reverted; tree is clean. Branch awaits the same merge decision
+as Tier 2 (it sits on top of the Tier-2 branch). Bump `PLATIMA_FORK_PATCH` and number this
+at merge time.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)

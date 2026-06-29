@@ -32,10 +32,44 @@ Build check: `llama-cli --version` must show `use_ime2: 1` in the startup banner
 
 | Modality | Status |
 |---|---|
-| Vision (mmproj) on Gemma 4 | working via `llama-mtmd-cli --jinja --image ...` |
+| Vision (mmproj) on Gemma 4 E2B / E4B (`gemma3` projector) | working via `llama-mtmd-cli --jinja --image ...` |
+| Vision (mmproj) on Gemma 4 12B Unified (`gemma4uv` projector) | working — loads after the #24077 cherry-pick; see note below |
 | Audio (mmproj) on Gemma 4 | working via `llama-mtmd-cli --jinja --audio ...` |
 
 End-to-end smoke test results are in [`TODO.md`](TODO.md) under "Functional test".
+
+#### Gemma 4 12B Unified vision (`gemma4uv`) — branch `platima-mtmd-gemma4uv`
+
+The 12B "Unified" QAT model uses an **encoder-free** projector (`gemma4uv` for vision,
+`gemma4ua` for audio): raw patches → conv `patch_embd` → position embeddings → a single
+`mm.input_projection` linear → straight into the decoder (`n_layer=0`). Its 11-tensor /
+175 MB mmproj is therefore *complete*, not truncated, and `patch_size` becomes 48 by
+design (file's 16 × n_merge 3, the merge folded into the conv layer).
+
+Our fork was ~2 months behind upstream and threw `unknown projector type: gemma4uv`.
+The runtime fix is upstream commit `a731805ce` *"mtmd, model: allow skip build_vit()
+(#24077)"* — **not** the widely-cited PR #24118, which only touches `conversion/gemma.py`.
+Cherry-picked onto branch `platima-mtmd-gemma4uv` (off the Tier-2 vision branch). Builds
+clean; 12B encodes a normal image in ~55 ms.
+
+**Known limitation — tiny images misread (not a port bug).** On the K3, the 12B model
+misreads a very small 236×214 "Hi" test image (sees a "narrow strip / bottles") while
+x86 upstream reads it correctly. This was exhaustively bisected and is **not** a
+SpacemiT-port defect — every fork-specific cause was ruled out: threading race
+(`-t 1` == `-t 8`, byte-identical), `ggml_im2col` (plain scalar C, identical to x86), all
+SpacemiT RVV vision kernels (routed the whole vision encode to generic ggml-cpu), f16
+matmul precision (forced patch + input projection to f32), the IME2 decoder (disabled IME
+mul_mat, ran the whole 12B on generic Q4_K), and preprocessing/geometry/layout (dumped
+the preprocessed tensor — a perfect clean "Hi", correct 336×336 / 7×7 grid, correct
+HWC→planar de-interleave). The only remaining K3-vs-x86 difference is inherent RISC-V
+vectorised FP (RVV reduction order/rounding vs x86 AVX; no fast-math flag involved). It
+only bites because upstream itself documents this encoder-free model as performing "quite
+poor with small images" — tiny low-information inputs sit on its decision boundary and
+sub-ulp numeric noise tips the read. **Normal images work fine** (`Test3.jpg` reads
+correctly: "a laboratory… a person"). Mitigations: use normal-sized images, or pad small
+ones into a larger white canvas (more tokens/margin, more in-distribution) — both fix the
+read on K3. Upstream's own mitigation (`set_limit_image_tokens(40,280)`, `clip.cpp`) is
+already in our fork.
 
 ### Tool MTP awareness
 
@@ -160,6 +194,12 @@ Per-run measurements accumulate in [`results.log`](results.log).
 See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster — bf16 mmproj weights re-typed/quantized for the vectorised F16 or IME2-int8 path; Tier 1 bf16→F16 ~24×, Tier 2 bf16→q8_0 a further ~1.9×; now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
+
+Two feature branches sit ahead of `platima-mtmd` awaiting a merge decision:
+`platima-mtmd-tier2-ime2-vision` (patch 21 Tier 2 + auto-gating) and
+`platima-mtmd-gemma4uv` (the above, plus the upstream #24077 cherry-pick that enables 12B
+Unified vision). The `--version` patch stamp is bumped at merge time, not on the feature
+branch.
 
 ## Known issues
 
