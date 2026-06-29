@@ -813,11 +813,11 @@ GGML_OP_TIMING=1 llama-speculative-simple ...  2>&1 | grep -A100 GGML_OP_TIMING
 GGML_OP_TIMING=1 GGML_OP_TIMING_ALL=1 ...      # record every named tensor (large)
 ```
 
-## Patch 15 (DEFERRED 2026-06-15) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
+## Patch 15 (DISMISSED 2026-06-15, reaffirmed 2026-06-29) — unify `embd_pre_norm` / `embd_nextn` + fold `mtp_on_hybrid_qwen35`
 
-Closed without implementation. Scope conflicts with preserving the
-parallel pre_norm / nextn tap infrastructure for upcoming features and
-external consumers of this fork.
+Dismissed without implementation, and reaffirmed: pure internal refactor with no perf or
+functional payoff. Scope conflicts with preserving the parallel pre_norm / nextn tap
+infrastructure for upcoming features and external consumers of this fork.
 
 Investigation surfaced that `llama_model_mtp_uses_nextn` currently
 returns `true` for every arch (including `default:`), which means the
@@ -1158,7 +1158,7 @@ q8_0 holds quality on the complex image too — its description is as detailed a
 correct as F16/bf16 (all three identify the man, overalls, drill, workshop and the
 ceiling ductwork/AC). The ~2× speed advantage over F16 is consistent with Test.png.
 
-### Auto-gating on CPU capability (replaces the bare opt-in flags)
+### Patch 22 — Tier 2 + auto-gating on CPU capability (replaces the bare opt-in flags)
 
 Both tiers now self-gate so the K3 default needs no env var, while staying portable
 and a no-op on non-K3 / non-bf16-mmproj builds:
@@ -1195,9 +1195,9 @@ watermark is caught only by Qwen; Gemma misses it across *all* tiers including
 unquantized bf16, so it's a model ceiling, not a q8_0 artifact. Runner:
 `platima-spacemit/run_vision_matrix.sh`.
 
-Still on branch `platima-mtmd-tier2-ime2-vision` pending the user's merge decision.
+Merged into `platima-mtmd` (fast-forward) as patches 21 (Tier 1) + 22 (Tier 2 + auto-gate).
 
-## Gemma 4 12B Unified vision (`gemma4uv`) — upstream #24077 cherry-pick (branch `platima-mtmd-gemma4uv`)
+## Patch 23 — Gemma 4 12B Unified vision (`gemma4uv`), upstream #24077 cherry-pick
 
 The 12B QAT "Unified" model (`unsloth-gemma-4-12B-it-qat-GGUF`) uses an **encoder-free**
 projector — `gemma4uv` (vision) / `gemma4ua` (audio): raw patches → conv `patch_embd` →
@@ -1238,9 +1238,30 @@ person"). Mitigations: use normal-sized images, or pad small ones into a larger 
 canvas — both fix the read on K3. Upstream's mitigation (`set_limit_image_tokens(40,280)`,
 clip.cpp ~1416) is already in our fork. Don't chase this in our kernels.
 
-All diagnostic edits were reverted; tree is clean. Branch awaits the same merge decision
-as Tier 2 (it sits on top of the Tier-2 branch). Bump `PLATIMA_FORK_PATCH` and number this
-at merge time.
+All diagnostic edits were reverted; tree is clean. Merged into `platima-mtmd`
+(fast-forward) as patch 23; `PLATIMA_FORK_PATCH` bumped to 23. A follow-up (proposed)
+upscales sub-threshold images in preprocessing for the gemma4uv-on-RISC-V case so the
+read is robust without manual padding — see "Patch 24 (proposed)" below.
+
+## Patch 24 (PROPOSED 2026-06-29) — upscale sub-threshold images for gemma4uv on RISC-V
+
+Targeted robustness fix for the patch-23 tiny-image misread. Since the misread is
+gemma4uv-specific AND RISC-V-numerics-specific (x86 reads tiny images fine; other
+projectors unaffected), the mitigation is scoped to exactly that intersection:
+
+- **Gate:** RISC-V build (`__riscv` / spacemit CPU) **and** projector == `gemma4uv`.
+  x86 and all non-gemma4uv projectors keep byte-identical behaviour (no-op).
+- **Action:** in clip preprocessing, if the input is below the empirically-determined
+  minimum reliable size, scale it up to that size before patching. (Open question to
+  settle by test: upscale the *content* vs. *pad* into a larger canvas. Padding is the
+  already-proven fix on K3; upscaling is the user's preferred shape and is untested —
+  pick whichever the size sweep shows reads reliably with the fewest added tokens.)
+
+**Prerequisite (do first):** size sweep on the 12B model to find the minimum input
+dimensions that read the "Hi" test reliably on K3 (and confirm a couple of other tiny
+inputs), respecting the existing `set_limit_image_tokens(40,280)` token bounds. The
+threshold from that sweep becomes the upscale target. Sweep is slow (12B encode per run)
+and TCM-poisoning-prone, so `rm -f /dev/shm/tcm_sync_standalone` between runs.
 
 ## K3 A100 / X100 improvements observed during the merge
 

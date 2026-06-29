@@ -38,7 +38,7 @@ Build check: `llama-cli --version` must show `use_ime2: 1` in the startup banner
 
 End-to-end smoke test results are in [`TODO.md`](TODO.md) under "Functional test".
 
-#### Gemma 4 12B Unified vision (`gemma4uv`) — branch `platima-mtmd-gemma4uv`
+#### Gemma 4 12B Unified vision (`gemma4uv`) — patch 23
 
 The 12B "Unified" QAT model uses an **encoder-free** projector (`gemma4uv` for vision,
 `gemma4ua` for audio): raw patches → conv `patch_embd` → position embeddings → a single
@@ -191,15 +191,13 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster — bf16 mmproj weights re-typed/quantized for the vectorised F16 or IME2-int8 path; Tier 1 bf16→F16 ~24×, Tier 2 bf16→q8_0 a further ~1.9×; now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above). Deferred/dismissed: 15 (buffer-unification refactor), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster, Tier 1 — bf16 mmproj weights re-typed to the vectorised F16 RVV path, ~24×), 22 (vision encode Tier 2 — bf16 weights quantized to q8_0 onto the IME2 int8 engine, a further ~1.9×; both tiers now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above), 23 (Gemma 4 12B Unified `gemma4uv` vision enabled via the upstream #24077 cherry-pick; tiny-image misread diagnosed as inherent RISC-V FP × model fragility, not a port bug — see above). Deferred/dismissed: 15 (buffer-unification refactor — dismissed; see TODO), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
 
-Two feature branches sit ahead of `platima-mtmd` awaiting a merge decision:
-`platima-mtmd-tier2-ime2-vision` (patch 21 Tier 2 + auto-gating) and
-`platima-mtmd-gemma4uv` (the above, plus the upstream #24077 cherry-pick that enables 12B
-Unified vision). The `--version` patch stamp is bumped at merge time, not on the feature
-branch.
+Patches 22 and 23 were developed on the feature branches `platima-mtmd-tier2-ime2-vision`
+and `platima-mtmd-gemma4uv`, both now merged into `platima-mtmd` (fast-forward; the
+branches remain on origin for reference).
 
 ## Known issues
 
