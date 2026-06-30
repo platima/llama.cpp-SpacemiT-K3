@@ -1274,6 +1274,53 @@ plain upscale). Repro scripts: `platima-spacemit/run_gemma4uv_size_sweep.sh` (+ 
 ad-hoc `/tmp/vsweep/confirm.sh` pattern). Sweep is slow and TCM-poisoning-prone, so
 `rm -f /dev/shm/tcm_sync_standalone` between runs.
 
+## Upstream cherry-pick branches (staged off `platima-mtmd`, not yet merged)
+
+Survey of recent upstream llama.cpp for Qwen / Gemma / MTMD / MMPROJ / RISC-V / RVV /
+SpacemiT / IME / spec-decode work yielded **no** RISC-V or SpacemiT perf commits to take
+(our fork is already ahead on those paths). Two low-risk, generally-useful sets were
+cherry-picked onto their own branches so a bad port can be dropped without touching
+mainline. Patch numbers are assigned only if/when they merge to `platima-mtmd` (next = 25+).
+
+- **`platima-spec-metrics`** — cherry-pick `635b65ad7` "spec metrics: mean acceptance
+  length + acceptance rate per position (#24536)". Adds `n_draft_verif_steps` and
+  `n_accepted_per_pos[]` tracking + richer server log line. **No MTP conflict** — does not
+  touch our arch-aware tap dispatch. One conflict in `server-context.cpp`: kept our
+  fork-specific `SLT_CNT` log macro but folded in the new mean-acc-length / per-position
+  format. Useful for measuring our MTP draft quality with real numbers.
+- **`platima-mtmd-upstream-fixes`** — three mtmd correctness commits:
+  - `e36a602ba` (Qwen-video `n_tokens` miscount) — **SKIPPED, inapplicable.** It fixes the
+    qwen-vl temporal-merge path; our fork has no `n_temporal_merge` member at all (predates
+    that feature), so the bug cannot manifest here.
+  - `e2e7a9b2d` (several bug fixes #24784) — took the gemma4ua audio validation guards
+    (`fft_based = proj_type != GEMMA4UA`, n_mel_bins range check), `image_size > 65536`
+    guard, `get_u32` INT32_MAX sanity check, and the int64 overflow hardening in
+    `mtmd-audio.cpp` (auto-merged). Dropped upstream's `clip_image_f32::set_size`/`cpy_buf`
+    and `clip_image_size::area()`/`operator==` rewrites — our fork uses the older
+    direct-`nx`/`ny` API and never calls `area()`, so those were kept as our style. Kept the
+    int64→uint32 narrowing `GGML_ASSERT`s in the audio mel loop (mel dims are `int64_t`).
+  - `0d135df48` (`mtmd_get_memory_usage` fix #24867) — moved the `if (!ctx_clip.no_alloc)`
+    guard to wrap only the file-read loop (buffers still allocate for memory estimation),
+    keeping our Tier-1/Tier-2 bf16→f16 / bf16→q8_0 conversion loop body and the
+    `ctx_data_ime` tensor lookup intact; passes `no_alloc=true` into the
+    `mtmd_context` ctor (already had the `bool no_alloc = false` param).
+
+## Deferred — upstream spec-decode features (EAGLE3, DFlash)
+
+Both evaluated during the survey and **deferred** (per user): each needs a draft-model
+checkpoint we do not have locally, and both conflict with our tree. Documented here as
+future branches; no code written.
+
+- **EAGLE3** — upstream base `88a39274e` + `a1824902b` + `b14e3fb90` (~27 files). Our fork
+  already carries a **stub** `common_speculative_impl_draft_eagle3` (`common/speculative.cpp`
+  ~line 379) whose `process()` / `draft()` are no-op `// TODO: implement`. A real port would
+  have to **replace** that stub and reconcile with our arch-aware MTP tap dispatch. **Blocker:**
+  no Qwen3.5 EAGLE3 draft checkpoint in `~/models` (we only have the MTP drafts
+  `unsloth-Qwen3.5-{2B,4B,9B}-MTP-GGUF`).
+- **DFlash** — `d1b34251b` (+712, new `src/models/dflash.cpp`) + `fa72bc682`. **Blockers:**
+  no converted DFlash draft GGUF locally; logging-macro style differs from our tree
+  (mechanical but noisy conflicts). Largest of the deferred items (a whole new model).
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
