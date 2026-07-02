@@ -6,6 +6,7 @@
 #include "traits.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
+#include "ggml-profile.h"
 #include "quants.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
@@ -3144,6 +3145,8 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         // Try fused ops, fall back to normal compute
         const bool time_this = ggml_op_timing_enabled && state->ith == 0;
         const int64_t t0 = time_this ? ggml_time_us() : 0;
+        ggml_profile_log_op_begin(node, state->ith, params.nth);
+
         const int n_fused = ggml_cpu_try_fuse_ops(cgraph, node_n, &params, cplan);
         if (n_fused > 0) {
             node_n += n_fused;
@@ -3157,6 +3160,8 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             ggml_op_timing_record(node, ggml_time_us() - t0);
         }
 
+        ggml_profile_log_op_end(node, state->ith, params.nth);
+
         if (state->ith == 0 && cplan->abort_callback &&
                 cplan->abort_callback(cplan->abort_callback_data)) {
             atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);
@@ -3166,7 +3171,10 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         if (node_n + 1 < cgraph->n_nodes) {
             ggml_barrier(state->threadpool);
         }
+
     }
+
+    ggml_profile_flush_tls();
 
 #ifdef GGML_USE_OPENMP
     GGML_PRINT_DEBUG("thread #%d compute-done cplan %p\n", state->ith, (const void *)cplan);
