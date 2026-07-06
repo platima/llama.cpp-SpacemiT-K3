@@ -1399,9 +1399,19 @@ Qwen3VL because it needs 1024+ vision tokens/frame. Not port bugs; a throughput 
 Config: `-c 16384 -fa 1 --temp 0` (main model mmap'd, no `--no-mmap`, so KV+staging fit
 under 16 GB); default context (`101120`) OOMs — must cap `-c`. 2s clip ≈ 8 frames at 4fps.
 
-**Audio re-test (deferred, per user 2026-07-06):** audio input works (E4B confirmed in the
-functional-test table above via `tools/mtmd/test-2.mp3`). Re-run audio on the gemma
-audio-capable set (E2B/E4B/12B; 26B-A4B if it carries gemma4ua) now that the video
-branch + thread auto-clamp landed, to confirm no regression. Qwen models have no audio
-projector. `--jinja` required for all gemma runs; `rm -f /dev/shm/tcm_sync_standalone`
-between spacemit runs.
+**Audio re-test (DONE 2026-07-06):** re-ran audio on the full gemma audio-capable set
+(`--audio tools/mtmd/test-2.mp3 --jinja -c 8192 -fa 1 --temp 0`) after the video branch +
+thread auto-clamp landed. **All PASS, no regression, no crash:**
+
+| Model | audio result |
+|-------|--------------|
+| gemma-4-E2B | ✅ transcribed: "The New York Times from July 21st, 1969. This isn't just newsprint and ink…" |
+| gemma-4-E4B | ✅ transcribed: NYT July 21 1969, "grand, dramatic" tone (baseline, unregressed) |
+| gemma-4-12B (gemma4uv/4ua) | ✅ "a narrator speaking about The New York Times from July 21, 1969, and the moon landing" — 12B DOES carry the audio projector |
+
+Google's model card lists audio as native on **E2B/E4B/12B only** — 26B-A4B is not
+audio-capable (and its video decode was already impractically slow), so it's not in scope.
+Qwen models have no audio projector at all. Gotcha: the E-series main model file is named
+`gemma-4-E4B_q4_0-it.gguf` (underscore), NOT `gemma-4-E4B-it-*` — a glob on `E4B-it-*`
+matches only the mmproj and silently loads it as `-m` (→ `unsupported model
+architecture: 'clip'`). `rm -f /dev/shm/tcm_sync_standalone` between spacemit runs.
