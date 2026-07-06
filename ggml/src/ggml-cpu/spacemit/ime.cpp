@@ -1723,6 +1723,17 @@ static int bind_ai_thread() {
     return 0;
 }
 
+int ggml_backend_cpu_riscv64_spacemit_max_perfer_threads(void) {
+    // When TCM is active each compute thread is bound 1:1 to a preferred (A100/IME2)
+    // core; requesting more threads than preferred cores overflows perfer_core_ids and
+    // aborts in set_numa_thread_affinity. Report the usable cap so callers can clamp.
+    const auto & info = ggml::cpu::riscv64_spacemit::global_spine_env_info;
+    if (info.use_tcm) {
+        return static_cast<int>(info.perfer_core_ids.size());
+    }
+    return 0;  // 0 = no spacemit-imposed limit
+}
+
 void ggml_backend_cpu_riscv64_spacemit_set_numa_thread_affinity(int thread_n) {
     int cpu_id = sched_getcpu();
     if (ggml::cpu::riscv64_spacemit::global_spine_env_info.use_ime2 &&
