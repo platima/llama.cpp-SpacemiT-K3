@@ -288,6 +288,15 @@ extern "C" {
         ggml_backend_buffer_type_t buft;
     };
 
+    // [EXPERIMENTAL] re-type a drafter/MTP model's 2D bf16 weights at load time so their
+    // mul_mats hit a faster kernel on targets where bf16 vec_dot is scalar (e.g. RISC-V
+    // with zvfh but no zvfbfwma). Set only on draft/MTP loads; the main model is untouched.
+    enum llama_draft_retype {
+        LLAMA_DRAFT_RETYPE_OFF  = 0, // leave bf16 as-is
+        LLAMA_DRAFT_RETYPE_F16  = 1, // bf16 -> f16 (vectorized f16 vec_dot)
+        LLAMA_DRAFT_RETYPE_Q8_0 = 2, // bf16 -> q8_0 (routes to the SpacemiT IME2 int8 engine)
+    };
+
     struct llama_model_params {
         // NULL-terminated list of devices to use for offloading (if NULL, all available devices are used)
         ggml_backend_dev_t * devices;
@@ -314,6 +323,9 @@ extern "C" {
 
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
+
+        // [EXPERIMENTAL] re-type 2D bf16 weights at load (drafter/MTP only). See llama_draft_retype.
+        enum llama_draft_retype draft_retype_bf16;
 
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights

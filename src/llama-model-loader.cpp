@@ -1249,7 +1249,36 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     }
 
     ggml_tensor * t_meta = get_tensor_meta(tn.str().c_str());
-    ggml_backend_buffer_type_t buft = buft_for_tensor(t_meta);
+
+    // drafter/MTP bf16 retype: pick a faster target type for 2D bf16 mul_mat/get_rows
+    // weights. F16 hits the vectorized f16 vec_dot; Q8_0 routes onto the SpacemiT IME2
+    // int8 engine. The source (weights_map) tensor stays bf16; only the destination is
+    // retyped and the raw bf16 data is converted in load_all_data.
+    ggml_type dst_type = GGML_TYPE_COUNT; // sentinel: no retype
+    if (t_meta && draft_retype_bf16 != LLAMA_DRAFT_RETYPE_OFF &&
+        t_meta->type == GGML_TYPE_BF16 && ggml_n_dims(t_meta) == 2) {
+        if (draft_retype_bf16 == LLAMA_DRAFT_RETYPE_F16) {
+            dst_type = GGML_TYPE_F16;
+        } else if (draft_retype_bf16 == LLAMA_DRAFT_RETYPE_Q8_0 &&
+                   t_meta->ne[0] % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
+            dst_type = GGML_TYPE_Q8_0;
+        }
+    }
+
+    // For Q8_0 the buffer type must be selected against the target type so the SpacemiT
+    // extra buffer claims it (F16 lands in the same CPU buffer as bf16, so no override).
+    ggml_backend_buffer_type_t buft;
+    if (dst_type == GGML_TYPE_Q8_0) {
+        ggml_tensor meta_retyped = *t_meta;
+        meta_retyped.type = GGML_TYPE_Q8_0;
+        meta_retyped.nb[0] = ggml_type_size(GGML_TYPE_Q8_0);
+        meta_retyped.nb[1] = meta_retyped.nb[0] * (meta_retyped.ne[0] / ggml_blck_size(GGML_TYPE_Q8_0));
+        meta_retyped.nb[2] = meta_retyped.nb[1] * meta_retyped.ne[1];
+        meta_retyped.nb[3] = meta_retyped.nb[2] * meta_retyped.ne[2];
+        buft = buft_for_tensor(&meta_retyped);
+    } else {
+        buft = buft_for_tensor(t_meta);
+    }
     if (buft == nullptr) {
         return nullptr; // return type is ggml_tensor *
     }
@@ -1272,7 +1301,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 
     const bool duplicated = flags & TENSOR_DUPLICATED;
 
-    struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
+    struct ggml_tensor * tensor;
+    if (dst_type != GGML_TYPE_COUNT) {
+        tensor = ggml_new_tensor_2d(ctx, dst_type, cur->ne[0], cur->ne[1]);
+    } else {
+        tensor = ggml_dup_tensor(ctx, cur);
+    }
     ggml_set_name(tensor, ggml_get_name(cur));
 
     if (duplicated) {
@@ -1532,6 +1566,54 @@ bool llama_model_loader::load_all_data(
         }
 
         size_t n_size = ggml_nbytes(cur);
+
+        // drafter/MTP bf16 retype: the destination was created with a different type than
+        // the on-disk bf16 source (see create_tensor). Stream the raw bf16 in row blocks,
+        // convert, and set each block (ggml_backend_tensor_set repacks q8_0 onto the
+        // SpacemiT IME2 buffer). Retype loads force use_mmap=false, so the source is always
+        // read from file here. The conversion is chunked by rows to keep peak staging
+        // bounded: token_embd alone is ~2 GB whole-tensor, which OOMs a swapless board.
+        if (weight->tensor->type == GGML_TYPE_BF16 && cur->type != GGML_TYPE_BF16) {
+            if (cur->type != GGML_TYPE_F16 && cur->type != GGML_TYPE_Q8_0) {
+                throw std::runtime_error(format("unexpected drafter retype target %s for tensor '%s'",
+                    ggml_type_name(cur->type), ggml_get_name(cur)));
+            }
+            const int64_t n_per_row  = cur->ne[0];
+            const int64_t nrows      = ggml_nelements(cur) / n_per_row;
+            const size_t  src_stride = n_per_row * sizeof(ggml_bf16_t);
+            const size_t  dst_stride = cur->nb[1]; // row bytes in the destination type
+            // cap the transient src+f32 staging at ~64 MiB of source per block
+            const int64_t block_rows = std::max<int64_t>(1, (64ll << 20) / (int64_t) src_stride);
+            const auto &  file       = files.at(weight->idx);
+
+            // Fill the whole destination, then set it in ONE shot: the SpacemiT IME2 buffer
+            // repacks q8_0 on set_tensor and asserts size == ggml_nbytes (ime.cpp), so it
+            // rejects partial/offset writes. The src+f32 staging stays row-block bounded to
+            // avoid the ~2 GB whole-tensor spike (token_embd) that OOMs a swapless board.
+            std::vector<char>  dst_buf(n_size);
+            std::vector<char>  src_buf(block_rows * src_stride);
+            std::vector<float> f32(block_rows * n_per_row);
+
+            for (int64_t r0 = 0; r0 < nrows; r0 += block_rows) {
+                const int64_t rows = std::min<int64_t>(block_rows, nrows - r0);
+                const int64_t nelt = rows * n_per_row;
+
+                file->seek(weight->offs + (size_t) r0 * src_stride, SEEK_SET);
+                file->read_raw(src_buf.data(), (size_t) rows * src_stride);
+                ggml_bf16_to_fp32_row((const ggml_bf16_t *) src_buf.data(), f32.data(), nelt);
+
+                char * dst_row = dst_buf.data() + (size_t) r0 * dst_stride;
+                if (cur->type == GGML_TYPE_F16) {
+                    ggml_fp32_to_fp16_row(f32.data(), (ggml_fp16_t *) dst_row, nelt);
+                } else {
+                    ggml_quantize_chunk(GGML_TYPE_Q8_0, f32.data(), dst_row, 0, rows, n_per_row, nullptr);
+                }
+            }
+            ggml_backend_tensor_set(cur, dst_buf.data(), 0, n_size);
+
+            size_done += n_size;
+            continue;
+        }
 
         if (use_mmap) {
             const auto & mapping = mappings.at(weight->idx);

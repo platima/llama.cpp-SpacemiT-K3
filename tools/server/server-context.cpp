@@ -1050,6 +1050,7 @@ struct server_context_impl {
             params_dft.tensor_buft_overrides = params_spec.tensor_buft_overrides;
 
             auto mparams_dft = common_model_params_to_llama(params_dft);
+            common_apply_draft_retype(mparams_dft);
 
             model_dft.reset(llama_model_load_from_file(params_dft.model.path.c_str(), mparams_dft));
             if (model_dft == nullptr) {

@@ -1,4 +1,7 @@
 #include "ggml.h"
+#include "ggml-cpu.h"
+#include "ggml-backend.h"
+#include "ggml-cpp.h"
 #include "gguf.h"
 
 #include "build-info.h"
@@ -1555,6 +1558,73 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.no_alloc                    = params.no_alloc;
 
     return mparams;
+}
+
+// Does a small q8_0 tensor actually repack onto the SpacemiT IME2 buffer? Confirms the
+// int8 engine is live (mirrors the clip.cpp vision probe). Returns the ime buft or null.
+static ggml_backend_buffer_type_t common_find_ime_q8_0_buft() {
+    ggml_backend_buffer_type_t ime_buft = nullptr;
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (cpu_dev) {
+        ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
+        auto get_extra_bufts_fn = (ggml_backend_dev_get_extra_bufts_t)
+            ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_dev_get_extra_bufts");
+        if (get_extra_bufts_fn) {
+            ggml_backend_buffer_type_t * bufts = get_extra_bufts_fn(cpu_dev);
+            while (bufts && *bufts) {
+                if (std::string(ggml_backend_buft_name(*bufts)) == "CPU_RISCV64_SPACEMIT") {
+                    ime_buft = *bufts;
+                    break;
+                }
+                ++bufts;
+            }
+        }
+    }
+    if (ime_buft == nullptr) {
+        return nullptr;
+    }
+    ggml_init_params probe_params = { 2 * ggml_tensor_overhead(), NULL, /*.no_alloc =*/ true };
+    ggml_context_ptr probe_ctx(ggml_init(probe_params));
+    if (!probe_ctx) {
+        return nullptr;
+    }
+    ggml_tensor * probe = ggml_new_tensor_2d(probe_ctx.get(), GGML_TYPE_Q8_0, 64, 64);
+    ggml_backend_buffer_ptr probe_buf(ggml_backend_alloc_ctx_tensors_from_buft(probe_ctx.get(), ime_buft));
+    return (probe_buf && probe->extra != nullptr) ? ime_buft : nullptr;
+}
+
+void common_apply_draft_retype(struct llama_model_params & mparams) {
+    const char * v = getenv("LLAMA_DRAFT_BF16_TO");
+    if (v != nullptr) {
+        std::string s = v;
+        if (s == "f16" || s == "F16") {
+            mparams.draft_retype_bf16 = LLAMA_DRAFT_RETYPE_F16;
+        } else if (s == "q8_0" || s == "Q8_0") {
+            mparams.draft_retype_bf16 = LLAMA_DRAFT_RETYPE_Q8_0;
+        } else if (s == "off" || s == "0" || s == "false") {
+            mparams.draft_retype_bf16 = LLAMA_DRAFT_RETYPE_OFF;
+        } else {
+            LOG_WRN("%s: unrecognized LLAMA_DRAFT_BF16_TO='%s' (expected off|f16|q8_0) — ignoring\n", __func__, v);
+            return;
+        }
+    } else {
+        // Auto: on a board where f16 vec_dot is vectorized but bf16 is scalar (RISC-V zvfh
+        // without zvfbfwma), a bf16 drafter is catastrophically slow. Retype it — q8_0 onto
+        // the IME2 int8 engine when available (fastest; A3 probe winner), else f16.
+        const bool f16_faster_than_bf16 =
+            ggml_cpu_vec_dot_is_simd(GGML_TYPE_F16) && !ggml_cpu_vec_dot_is_simd(GGML_TYPE_BF16);
+        if (!f16_faster_than_bf16) {
+            return; // bf16 is fine on this build — leave off
+        }
+        mparams.draft_retype_bf16 =
+            common_find_ime_q8_0_buft() != nullptr ? LLAMA_DRAFT_RETYPE_Q8_0 : LLAMA_DRAFT_RETYPE_F16;
+    }
+    if (mparams.draft_retype_bf16 != LLAMA_DRAFT_RETYPE_OFF) {
+        // retyped tensors are converted into real backend buffers, not mmapped zero-copy
+        mparams.use_mmap = false;
+        LOG_INF("%s: drafter bf16 weights will be re-typed to %s at load (mmap disabled)\n",
+            __func__, mparams.draft_retype_bf16 == LLAMA_DRAFT_RETYPE_F16 ? "f16" : "q8_0");
+    }
 }
 
 struct llama_context_params common_context_params_to_llama(const common_params & params) {

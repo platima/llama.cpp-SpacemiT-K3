@@ -80,6 +80,9 @@ struct llama_model_loader {
     bool check_tensors;
     bool no_alloc;
 
+    // drafter/MTP only: re-type 2D bf16 weights at load (see llama_draft_retype)
+    enum llama_draft_retype draft_retype_bf16 = LLAMA_DRAFT_RETYPE_OFF;
+
     llama_files files;
     llama_ftype ftype;
     llama_fver  fver;
