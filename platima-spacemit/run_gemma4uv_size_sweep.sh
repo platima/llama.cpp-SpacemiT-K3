@@ -5,8 +5,8 @@ set -u
 cd /home/owner/llama-smt
 export LD_LIBRARY_PATH="$PWD/build/bin"
 BIN="$PWD/build/bin/llama-mtmd-cli"
-MODEL=/home/owner/models/unsloth-gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
-MMPROJ=/home/owner/models/unsloth-gemma-4-12B-it-qat-GGUF/mmproj-BF16.gguf
+MODEL=/models/unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+MMPROJ=/models/unsloth/gemma-4-12B-it-qat-GGUF/mmproj-BF16.gguf
 OUT=/tmp/vsweep
 PROMPT="What letters or text appear in this image? Answer with only the text you see."
 

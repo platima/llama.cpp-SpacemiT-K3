@@ -33,7 +33,7 @@ set -uo pipefail
 
 # ---- Paths -----------------------------------------------------------------
 # Build dir is auto-detected relative to this script (repo root / build/).
-# Model dir defaults to ~/models/unsloth-Qwen3.5-0.8B-GGUF/; both GGUFs are
+# Model dir defaults to /models/unsloth/Qwen3.5-0.8B-GGUF/; both GGUFs are
 # downloaded automatically on first run if missing.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$(dirname "$SCRIPT_DIR")/build"
@@ -44,7 +44,7 @@ BIN="$BUILD_DIR/bin/llama-completion"
 BIN_SPEC="$BUILD_DIR/bin/llama-speculative-simple"
 export LD_LIBRARY_PATH="$BUILD_DIR/bin"
 
-MODEL_DIR="$HOME/models/unsloth-Qwen3.5-0.8B-GGUF"
+MODEL_DIR="/models/unsloth/Qwen3.5-0.8B-GGUF"
 MODEL="$MODEL_DIR/Qwen3.5-0.8B-Q4_K_M.gguf"
 # mmproj not used in this 4-way text bench, but downloaded alongside for multimodal runs
 MMPROJ="$MODEL_DIR/mmproj-F16.gguf"

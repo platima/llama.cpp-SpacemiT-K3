@@ -23,9 +23,9 @@ run() {
   grep -iE 'converting 2D bf16|q8_0 for IME2|buffer type not found' "$log" | sort -u | sed 's/.*load_tensors: /  gate: /'
 }
 
-E2B=/home/owner/models/google-gemma-4-E2B-it-qat-q4_0-gguf
-E4B=/home/owner/models/google-gemma-4-E4B-it-qat-q4_0-gguf
-QW=/home/owner/models/unsloth-Qwen3.5-0.8B-GGUF
+E2B=/models/google/gemma-4-E2B-it-qat-q4_0-gguf
+E4B=/models/google/gemma-4-E4B-it-qat-q4_0-gguf
+QW=/models/unsloth/Qwen3.5-0.8B-GGUF
 
 case "${1:-all}" in
   e2b1) run "e2b_test"  $E2B/gemma-4-E2B_q4_0-it.gguf $E2B/gemma-4-E2B-it-mmproj.gguf Test.png ;;

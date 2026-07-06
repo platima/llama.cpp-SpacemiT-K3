@@ -28,7 +28,7 @@ SLEEP_RUN=3        # settle between individual runs (let pages free, OOM pressur
 SLEEP_MODEL=300    # cooldown between models (thermal headroom on sustained all-core load)
 PROMPT="Explain in technical detail how RISC-V vector extensions accelerate matrix multiplication in transformer inference, covering register width, fused multiply-add, and memory bandwidth."
 
-MODELS_ROOT="$HOME/models"
+MODELS_ROOT="/models"   # USB SSD, HF org/repo layout (moved off root fs 2026-07-03)
 OUTDIR="$HOME/bench-matrix-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUTDIR"
 BENCH_TSV="$OUTDIR/results_bench.tsv"
@@ -57,28 +57,30 @@ lib_for () { local dir="$1"
 
 # ---- Phase 1 models (base): "LABEL|RELPATH" ----
 BENCH_MODELS=(
-  "Qwen3.5-0.8B-Q4_K_M|unsloth-Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q4_K_M.gguf"
-  "Qwen3.5-2B-Q4_1|unsloth-Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_1.gguf"
-  "Qwen3.5-4B-Q4_K_M|unsloth-Qwen3.5-4B-GGUF/Qwen3.5-4B-Q4_K_M.gguf"
-  "Qwen3.5-4B-UD-Q4_K_XL|unsloth-Qwen3.5-4B-GGUF/Qwen3.5-4B-UD-Q4_K_XL.gguf"
-  "Qwen3.5-9B-Q4_K_M|unsloth-Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"
-  "gemma-4-E2B-q4_0-google|google-gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf"
-  "gemma-4-E2B-qat-UD-Q4_K_XL|unsloth-gemma-4-E2B-it-qat-GGUF/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"
-  "gemma-4-E4B-q4_0-google|google-gemma-4-E4B-it-qat-q4_0-gguf/gemma-4-E4B_q4_0-it.gguf"
-  "gemma-4-E4B-qat-UD-Q4_K_XL|unsloth-gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"
-  "gemma-4-12b-Q4_K_M|unsloth-gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf"
-  "gemma-4-12B-qat-UD-Q4_K_XL|unsloth-gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+  "Qwen3.5-0.8B-Q4_K_M|unsloth/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q4_K_M.gguf"
+  "Qwen3.5-2B-Q4_1|unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q4_1.gguf"
+  "Qwen3.5-4B-Q4_K_M|unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-Q4_K_M.gguf"
+  "Qwen3.5-4B-UD-Q4_K_XL|unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-UD-Q4_K_XL.gguf"
+  "Qwen3.5-9B-Q4_K_M|unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"
+  "gemma-4-E2B-q4_0-google|google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf"
+  "gemma-4-E2B-qat-UD-Q4_K_XL|unsloth/gemma-4-E2B-it-qat-GGUF/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"
+  "gemma-4-E4B-q4_0-google|google/gemma-4-E4B-it-qat-q4_0-gguf/gemma-4-E4B_q4_0-it.gguf"
+  "gemma-4-E4B-qat-UD-Q4_K_XL|unsloth/gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"
+  "gemma-4-12b-Q4_K_M|unsloth/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf"
+  "gemma-4-12B-qat-UD-Q4_K_XL|unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
 )
 
 # ---- Phase 2 MTP models: "LABEL|BASE_REL|DRAFTER_REL" (SELF = self-draft) ----
 MTP_MODELS=(
-  "Qwen3.5-2B-Q4_1-MTP|unsloth-Qwen3.5-2B-MTP-GGUF/Qwen3.5-2B-Q4_1.gguf|SELF"
-  "Qwen3.5-4B-Q4_K_M-MTP|unsloth-Qwen3.5-4B-MTP-GGUF/Qwen3.5-4B-Q4_K_M.gguf|SELF"
-  "Qwen3.5-9B-Q4_K_M-MTP|unsloth-Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf|SELF"
-  "gemma-4-E2B-qat-MTP|unsloth-gemma-4-E2B-it-qat-GGUF/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf|unsloth-gemma-4-E2B-it-qat-GGUF/mtp-gemma-4-E2B-it.gguf"
-  "gemma-4-E4B-qat-MTP|unsloth-gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf|unsloth-gemma-4-E4B-it-qat-GGUF/mtp-gemma-4-E4B-it.gguf"
-  "gemma-4-12b-MTP|unsloth-gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf|unsloth-gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf"
-  "gemma-4-12B-qat-MTP|unsloth-gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf|unsloth-gemma-4-12B-it-qat-GGUF/mtp-gemma-4-12B-it.gguf"
+  "Qwen3.5-2B-Q4_1-MTP|unsloth/Qwen3.5-2B-MTP-GGUF/Qwen3.5-2B-Q4_1.gguf|SELF"
+  "Qwen3.5-4B-Q4_K_M-MTP|unsloth/Qwen3.5-4B-MTP-GGUF/Qwen3.5-4B-Q4_K_M.gguf|SELF"
+  "Qwen3.5-9B-Q4_K_M-MTP|unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q4_K_M.gguf|SELF"
+  "gemma-4-E2B-qat-MTP|unsloth/gemma-4-E2B-it-qat-GGUF/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf|unsloth/gemma-4-E2B-it-qat-GGUF/mtp-gemma-4-E2B-it.gguf"
+  "gemma-4-E4B-qat-MTP|unsloth/gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf|unsloth/gemma-4-E4B-it-qat-GGUF/mtp-gemma-4-E4B-it.gguf"
+  "gemma-4-12b-MTP|unsloth/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf|unsloth/gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf"
+  "gemma-4-12B-qat-MTP|unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf|unsloth/gemma-4-12B-it-qat-GGUF/mtp-gemma-4-12B-it.gguf"
+  # Qwen3.6 = hybrid Gated-DeltaNet + MoE arch (self-MTP, PR #22673); 27B Q3_K_S ~12.5 GB, fits 16 GB with mmap
+  "Qwen3.6-27B-Q3_K_S-MTP|unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q3_K_S.gguf|SELF"
 )
 
 # ============================ PHASE 1 (no-MTP, fa 0 and 1) ============================
