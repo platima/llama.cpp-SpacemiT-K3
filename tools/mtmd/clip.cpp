@@ -1797,8 +1797,15 @@ struct clip_model_loader {
             }
         }
         const bool bf16_to_q8_0 = env_tristate("LLAMA_VISION_BF16_TO_Q8_0", ime_repacks_q8_0) && ime_buft != nullptr;
-        if (bf16_to_q8_0) {
-            LOG_INF("%s: quantising 2D bf16 vision weights to q8_0 for IME2 int8 engine\n", __func__);
+        // Same IME2 win for mmproj shipped as F16 (e.g. Qwen3-VL / Qwen3.6): F16 mul_mats
+        // run on RVV zvfh, not IME2. Quantise 2D F16 vision weights to q8_0 so they repack
+        // onto the int8 engine. Opt-in only (default off) — unlike the bf16 path this trades
+        // a little vision precision that the source didn't already lack; measure before
+        // making default. Override with LLAMA_VISION_F16_TO_Q8_0=1.
+        const bool f16_to_q8_0 = env_tristate("LLAMA_VISION_F16_TO_Q8_0", false) && ime_buft != nullptr && ime_repacks_q8_0;
+        if (bf16_to_q8_0 || f16_to_q8_0) {
+            LOG_INF("%s: quantising 2D %s vision weights to q8_0 for IME2 int8 engine\n", __func__,
+                    f16_to_q8_0 ? (bf16_to_q8_0 ? "bf16/f16" : "f16") : "bf16");
             ggml_init_params ime_params = {
                 /*.mem_size   =*/ static_cast<size_t>(gguf_get_n_tensors(ctx_gguf.get()) + 1) * ggml_tensor_overhead(),
                 /*.mem_buffer =*/ NULL,
@@ -1808,8 +1815,8 @@ struct clip_model_loader {
             if (!ctx_clip.ctx_data_ime) {
                 throw std::runtime_error(string_format("%s: failed to init ggml ime context\n", __func__));
             }
-        } else if (getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr && ime_buft == nullptr) {
-            LOG_WRN("%s: LLAMA_VISION_BF16_TO_Q8_0 set but CPU_RISCV64_SPACEMIT buffer type not found — ignoring\n", __func__);
+        } else if ((getenv("LLAMA_VISION_BF16_TO_Q8_0") != nullptr || getenv("LLAMA_VISION_F16_TO_Q8_0") != nullptr) && ime_buft == nullptr) {
+            LOG_WRN("%s: LLAMA_VISION_*_TO_Q8_0 set but CPU_RISCV64_SPACEMIT buffer type not found — ignoring\n", __func__);
         }
         auto get_tensor = [&](const std::string & name, bool required = true) {
             // Each tensor should only be loaded once; duplicates indicate a bug
@@ -1827,7 +1834,8 @@ struct clip_model_loader {
                 // to q8_0 in the spacemit ime context so they repack onto the IME2 int8
                 // engine. q8_0 needs ne[0] % 32 == 0 (block size). Data is read bf16,
                 // converted to f32 and quantised in the load loop below.
-                if (bf16_to_q8_0 && cur->type == GGML_TYPE_BF16 && ggml_n_dims(cur) == 2 &&
+                if (((bf16_to_q8_0 && cur->type == GGML_TYPE_BF16) ||
+                     (f16_to_q8_0  && cur->type == GGML_TYPE_F16)) && ggml_n_dims(cur) == 2 &&
                     cur->ne[0] % 32 == 0) {
                     data_tensor = ggml_new_tensor_2d(ctx_clip.ctx_data_ime.get(), GGML_TYPE_Q8_0, cur->ne[0], cur->ne[1]);
                 // Tier-1 vision speedup (SpacemiT K3): the build's -march has zfh/zvfh
@@ -2813,6 +2821,19 @@ struct clip_model_loader {
                     std::vector<float>   tmp_f32(n);
                     std::vector<uint8_t> tmp_q8(ggml_nbytes(cur));
                     ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t *>(read_buf.data()), tmp_f32.data(), n);
+                    ggml_quantize_chunk(GGML_TYPE_Q8_0, tmp_f32.data(), tmp_q8.data(), 0, cur->ne[1], cur->ne[0], nullptr);
+                    ggml_backend_tensor_set(cur, tmp_q8.data(), 0, tmp_q8.size());
+                    continue;
+                }
+                // Tier-2 (F16 mmproj): weight was re-typed F16 -> q8_0 in get_tensor.
+                // Read F16, convert via f32, quantise to q8_0, then set (repacks for IME2).
+                if (f16_to_q8_0 && t->type == GGML_TYPE_F16 && cur->type == GGML_TYPE_Q8_0) {
+                    const int64_t n = ggml_nelements(cur);
+                    read_buf.resize((size_t) n * sizeof(ggml_fp16_t));
+                    fin.read(reinterpret_cast<char *>(read_buf.data()), read_buf.size());
+                    std::vector<float>   tmp_f32(n);
+                    std::vector<uint8_t> tmp_q8(ggml_nbytes(cur));
+                    ggml_fp16_to_fp32_row(reinterpret_cast<const ggml_fp16_t *>(read_buf.data()), tmp_f32.data(), n);
                     ggml_quantize_chunk(GGML_TYPE_Q8_0, tmp_f32.data(), tmp_q8.data(), 0, cur->ne[1], cur->ne[0], nullptr);
                     ggml_backend_tensor_set(cur, tmp_q8.data(), 0, tmp_q8.size());
                     continue;
