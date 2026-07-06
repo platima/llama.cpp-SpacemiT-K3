@@ -1365,3 +1365,43 @@ Tap-mismatch note for future me: I tried the Gemma image test without
 `--jinja` first and got `this custom template is not supported, try
 using --jinja` — that's the `common_chat_templates_apply` path
 throwing for Gemma's custom template. Fix is the flag, not the model.
+
+## mtmd video port (branch `platima-mtmd-video`, 46a7c3f0c) — testing matrix (2026-07-06)
+
+Ported upstream #24269 video support surgically (fork predates the lazy/placeholder base
+refactor, so cherry-pick was impossible): lazy-bitmap API in `mtmd.{h,cpp}`, standalone
+ffmpeg-shelling video helper in `mtmd-helper.{h,cpp}` (vendored `sheredom/subprocess.h`,
+`MTMD_VIDEO` compile flag, ON by default), CLI fallback in `mtmd-cli.cpp` (`--image
+foo.mp4` routes through `load_media` image→video fallback; `/video` command added). Also
+auto-clamps graph threads to the TCM preferred-core count (780351a14) so `-t 8` is no
+longer needed. Full 720p clip at 4fps ≈ 277 frames (impractical on K3) — test with a
+~4s clip (`ffmpeg -y -i src.mp4 -t 4 -c copy /tmp/vid4s.mp4` ≈ 16 frames).
+
+Model test matrix (video = frame-sequence understanding; all have mmproj on hand):
+
+| Model | arch | image | video | audio | status |
+|-------|------|-------|-------|-------|--------|
+| gemma-4-E4B | gemma4v+4a | ✓ tested | ✓ tested (4s clip, coherent) | ✓ tested (test-2.mp3, patch history) | done |
+| gemma-4-E2B | gemma4v+4a | — | ✓ **PASS** (2s clip, coherent: man+grill/smoker) | — | video done |
+| gemma-4-12B | gemma4uv | ✓ re-tested (Test3.jpg, no regression) | ✓ **PASS** (2s clip, detailed: man+smoker+attire) | — | video+img done |
+| gemma-4-26B-A4B | gemma4 MoE | — | ⚠ port engaged, decode too slow to finish (>33min, no gen; likely Q3_K MoE experts miss IME2) | — | port ok, impractical |
+| Qwen3-VL-8B | qwen3vl | ✓ tested | ⚠ port engaged, encode too slow to finish (>41min; 1024+ tok/frame high-res) | n/a (no audio) | port ok, impractical |
+| Qwen3.5 9B/4B/2B (+MTP) | qwen3.5 | — | ✓ **PASS** (4B, 2s clip, complete+coherent, cross-frame action inference; M-RoPE `non-consecutive position` warns are benign) | n/a (no audio) | video done (4B) |
+| Qwen3.6-27B/35B-A3B-MTP | qwen3.6 | — | — | n/a | TODO |
+
+**Video test results (2026-07-06):** port works on every arch exercised — fallback
+(`image decode failed` → video init) fires correctly and frames encode. **Full coherent
+completions** on the light/mid models: gemma E2B, gemma 12B (gemma4uv), Qwen3.5-4B (best
+result — captured the propane-torch action across frames). Heavy models (gemma 26B-A4B
+MoE, Qwen3-VL-8B) engage the port and compute (no crash, memory safe under mmap) but are
+**too slow to complete on K3** — 26B likely because Q3_K MoE experts skip IME2 repack,
+Qwen3VL because it needs 1024+ vision tokens/frame. Not port bugs; a throughput ceiling.
+Config: `-c 16384 -fa 1 --temp 0` (main model mmap'd, no `--no-mmap`, so KV+staging fit
+under 16 GB); default context (`101120`) OOMs — must cap `-c`. 2s clip ≈ 8 frames at 4fps.
+
+**Audio re-test (deferred, per user 2026-07-06):** audio input works (E4B confirmed in the
+functional-test table above via `tools/mtmd/test-2.mp3`). Re-run audio on the gemma
+audio-capable set (E2B/E4B/12B; 26B-A4B if it carries gemma4ua) now that the video
+branch + thread auto-clamp landed, to confirm no regression. Qwen models have no audio
+projector. `--jinja` required for all gemma runs; `rm -f /dev/shm/tcm_sync_standalone`
+between spacemit runs.
