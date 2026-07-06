@@ -93,6 +93,7 @@ struct mtmd_cli_context {
     int                 n_batch;
 
     mtmd::bitmaps bitmaps;
+    std::vector<mtmd_helper::video_ptr> videos;
 
     // chat template
     common_chat_templates_ptr    tmpls;
@@ -180,12 +181,28 @@ struct mtmd_cli_context {
     }
 
     bool load_media(const std::string & fname) {
+        // try image/audio first
         mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(ctx_vision.get(), fname.c_str()));
-        if (!bmp.ptr) {
-            return false;
+        if (bmp.ptr) {
+            bitmaps.entries.push_back(std::move(bmp));
+            return true;
         }
-        bitmaps.entries.push_back(std::move(bmp));
-        return true;
+        // fall back to video (decoded lazily, frame by frame, via ffmpeg)
+        if (mtmd_helper_support_video(ctx_vision.get())) {
+            auto params = mtmd_helper_video_init_params_default();
+            mtmd_helper_video * vctx = mtmd_helper_video_init(ctx_vision.get(), fname.c_str(), params);
+            if (vctx) {
+                mtmd_bitmap * lazy = mtmd_bitmap_init_lazy(ctx_vision.get(), nullptr, vctx,
+                    [](size_t, void * user_data, mtmd_bitmap ** out_bitmap, char ** out_text) -> int {
+                        auto * v = static_cast<mtmd_helper_video *>(user_data);
+                        return mtmd_helper_video_read_next(v, out_bitmap, out_text);
+                    });
+                bitmaps.entries.emplace_back(lazy);
+                videos.emplace_back(vctx);
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -267,6 +284,7 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
     }
 
     ctx.bitmaps.entries.clear();
+    ctx.videos.clear();
 
     llama_pos new_n_past;
     if (mtmd_helper_eval_chunks(ctx.ctx_vision.get(),
@@ -401,6 +419,9 @@ int main(int argc, char ** argv) {
         if (mtmd_support_audio(ctx.ctx_vision.get())) {
             LOG("\n   /audio <path>    load an audio");
         }
+        if (mtmd_helper_support_video(ctx.ctx_vision.get())) {
+            LOG("\n   /video <path>    load a video");
+        }
         LOG("\n   /clear           clear the chat history");
         LOG("\n   /quit or /exit   exit the program");
         LOG("\n");
@@ -437,14 +458,15 @@ int main(int argc, char ** argv) {
             g_is_generating = true;
             bool is_image   = line == "/image" || line.find("/image ") == 0;
             bool is_audio   = line == "/audio" || line.find("/audio ") == 0;
-            if (is_image || is_audio) {
+            bool is_video   = line == "/video" || line.find("/video ") == 0;
+            if (is_image || is_audio || is_video) {
                 if (line.size() < 8) {
                     LOG_ERR("ERR: Missing media filename\n");
                     continue;
                 }
                 std::string media_path = line.substr(7);
                 if (ctx.load_media(media_path)) {
-                    LOG("%s %s loaded\n", media_path.c_str(), is_image ? "image" : "audio");
+                    LOG("%s %s loaded\n", media_path.c_str(), is_image ? "image" : is_audio ? "audio" : "video");
                     content += mtmd_default_marker();
                 }
                 // else, error is already printed by libmtmd

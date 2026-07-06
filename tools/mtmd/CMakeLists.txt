@@ -1,5 +1,7 @@
 # mtmd
 
+set(MTMD_VIDEO ON CACHE BOOL "enable video support in mtmd (requires ffmpeg binary in PATH)")
+
 find_package(Threads REQUIRED)
 
 add_library(mtmd
@@ -61,6 +63,10 @@ target_include_directories(mtmd PUBLIC  .)
 target_include_directories(mtmd PRIVATE ../..)
 target_include_directories(mtmd PRIVATE ../../vendor)
 target_compile_features   (mtmd PRIVATE cxx_std_17)
+
+if (MTMD_VIDEO)
+    target_compile_definitions(mtmd PRIVATE MTMD_VIDEO)
+endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties     (mtmd PROPERTIES POSITION_INDEPENDENT_CODE ON)
