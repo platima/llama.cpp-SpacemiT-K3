@@ -1365,3 +1365,77 @@ Tap-mismatch note for future me: I tried the Gemma image test without
 `--jinja` first and got `this custom template is not supported, try
 using --jinja` — that's the `common_chat_templates_apply` path
 throwing for Gemma's custom template. Fix is the flag, not the model.
+
+## mtmd video port (branch `platima-mtmd-video`, 46a7c3f0c) — testing matrix (2026-07-06)
+
+Ported upstream #24269 video support surgically (fork predates the lazy/placeholder base
+refactor, so cherry-pick was impossible): lazy-bitmap API in `mtmd.{h,cpp}`, standalone
+ffmpeg-shelling video helper in `mtmd-helper.{h,cpp}` (vendored `sheredom/subprocess.h`,
+`MTMD_VIDEO` compile flag, ON by default), CLI fallback in `mtmd-cli.cpp` (`--image
+foo.mp4` routes through `load_media` image→video fallback; `/video` command added). Also
+auto-clamps graph threads to the TCM preferred-core count (780351a14) so `-t 8` is no
+longer needed. Full 720p clip at 4fps ≈ 277 frames (impractical on K3) — test with a
+~4s clip (`ffmpeg -y -i src.mp4 -t 4 -c copy /tmp/vid4s.mp4` ≈ 16 frames).
+
+Model test matrix (video = frame-sequence understanding; all have mmproj on hand):
+
+| Model | arch | image | video | audio | status |
+|-------|------|-------|-------|-------|--------|
+| gemma-4-E4B | gemma4v+4a | ✓ tested | ✓ tested (4s clip, coherent) | ✓ tested (test-2.mp3, patch history) | done |
+| gemma-4-E2B | gemma4v+4a | — | ✓ **PASS** (2s clip, coherent: man+grill/smoker) | — | video done |
+| gemma-4-12B | gemma4uv | ✓ re-tested (Test3.jpg, no regression) | ✓ **PASS** (2s clip, detailed: man+smoker+attire) | — | video+img done |
+| gemma-4-26B-A4B | gemma4 MoE | — | ⚠ port engaged, decode too slow to finish (>33min, no gen; likely Q3_K MoE experts miss IME2) | — | port ok, impractical |
+| Qwen3-VL-8B | qwen3vl | ✓ tested | ⚠ port engaged, encode too slow to finish (>41min; 1024+ tok/frame high-res) | n/a (no audio) | port ok, impractical |
+| Qwen3.5 9B/4B/2B (+MTP) | qwen3.5 | — | ✓ **PASS** (4B: 0.5s/2-frame completes+coherent; 8-frame impractical ~30–40min, prefill-bound — see P3 note) | n/a (no audio) | video done (4B) |
+| Qwen3.6-27B/35B-A3B-MTP | qwen3.6 | — | ⚠ engages; 8-frame 720p times out (>25min, prefill-bound; 12.5 GB model forces `-ub 128`) — see P3 note | n/a | port ok, impractical @8f |
+
+**Video test results (2026-07-06):** port works on every arch exercised — fallback
+(`image decode failed` → video init) fires correctly and frames encode. **Full coherent
+completions** on the light/mid models: gemma E2B, gemma 12B (gemma4uv), Qwen3.5-4B (best
+result — captured the propane-torch action across frames). Heavy models (gemma 26B-A4B
+MoE, Qwen3-VL-8B) engage the port and compute (no crash, memory safe under mmap) but are
+**too slow to complete on K3** — 26B likely because Q3_K MoE experts skip IME2 repack,
+Qwen3VL because it needs 1024+ vision tokens/frame. Not port bugs; a throughput ceiling.
+Config: `-c 16384 -fa 1 --temp 0` (main model mmap'd, no `--no-mmap`, so KV+staging fit
+under 16 GB); default context (`101120`) OOMs — must cap `-c`. 2s clip ≈ 8 frames at 4fps.
+
+**P3 — heavy-model video ceiling characterization (2026-07-07):** the ceiling is
+**vision-token-prefill-bound with super-linear (growing-KV attention) cost**, not encode.
+Qwen3.5/3.6 emit ~2200–2300 vision tokens/frame at 720p, so an 8-frame (2s@4fps) clip is
+~17.8K tokens through the LLM. The per-ubatch prefill gap **grows** as KV accumulates
+(measured on 4B: 48s → 88s → 189s → 230s → 310s between successive `find_slot` events), so
+total prefill is super-linear in frame count. Reconciling the "Qwen3.5-4B PASS" entry above:
+that PASS (2s/8-frame) had **no time cap** — the 4B genuinely *does* video, but 8 frames of
+720p is **impractically slow (~30–40 min), not impossible**. Confirmed by A/B:
+- **2-frame (0.5s) clip completes** on 4B, coherent (man + smoker/propane-torch across
+  frames). Full prefill+encode window: baseline 170.9s vs `LLAMA_VISION_F16_TO_Q8_0=1`
+  149.7s — the IME2 vision retype fires in the video path (96 vision tensors on IME2, output
+  byte-preserved) and saves ~21s, consistent with the ~8–12% single-image encode win.
+- **8-frame clip does NOT finish** in 25 min on 4B at **either** `-ub 128` **or** `-ub 512`
+  (both exit 124; `-ub 512` reached 45 ubatches / ~22 min window). `-ub 512` is faster early
+  (~23 vs ~11 tok/s) but does **not** move the growing-context wall — ubatch size changes
+  early throughput, not the fundamental super-linear prefill cost.
+- **27B is far worse:** the 12.5 GB model forces `-ub 128` (larger ubatches OOM at 16 GB),
+  so it can't even buy the early-throughput head start; the 8-frame run times out.
+
+**Takeaway:** the IME2 F16→q8_0 vision retype (`LLAMA_VISION_F16_TO_Q8_0=1`) is a real
+per-frame *encode* win (~8–12%) that helps every frame, but video's dominant cost is LLM
+**prefill of the vision tokens**, which the retype does not touch. Practical K3 video =
+short clips / few frames (≤~2–3 frames at 720p, or downscale to cut tokens/frame).
+
+**Audio re-test (DONE 2026-07-06):** re-ran audio on the full gemma audio-capable set
+(`--audio tools/mtmd/test-2.mp3 --jinja -c 8192 -fa 1 --temp 0`) after the video branch +
+thread auto-clamp landed. **All PASS, no regression, no crash:**
+
+| Model | audio result |
+|-------|--------------|
+| gemma-4-E2B | ✅ transcribed: "The New York Times from July 21st, 1969. This isn't just newsprint and ink…" |
+| gemma-4-E4B | ✅ transcribed: NYT July 21 1969, "grand, dramatic" tone (baseline, unregressed) |
+| gemma-4-12B (gemma4uv/4ua) | ✅ "a narrator speaking about The New York Times from July 21, 1969, and the moon landing" — 12B DOES carry the audio projector |
+
+Google's model card lists audio as native on **E2B/E4B/12B only** — 26B-A4B is not
+audio-capable (and its video decode was already impractically slow), so it's not in scope.
+Qwen models have no audio projector at all. Gotcha: the E-series main model file is named
+`gemma-4-E4B_q4_0-it.gguf` (underscore), NOT `gemma-4-E4B-it-*` — a glob on `E4B-it-*`
+matches only the mmproj and silently loads it as `-m` (→ `unsupported model
+architecture: 'clip'`). `rm -f /dev/shm/tcm_sync_standalone` between spacemit runs.

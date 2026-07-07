@@ -32,6 +32,11 @@ struct mtmd_bitmap {
     std::vector<unsigned char> data;
     std::string id; // optional user-defined id, for ex: can be set to image hash, useful for KV cache tracking
     bool is_audio = false; // true if the bitmap is audio
+
+    // lazy-loaded bitmap: when set, this bitmap holds no data and is expanded into
+    // one or more chunks via the callback during mtmd_tokenize()
+    mtmd_bitmap_lazy_callback lazy_callback = nullptr;
+    void * lazy_user_data = nullptr;
 };
 
 // position indexing for decoder model
@@ -699,7 +704,9 @@ struct mtmd_tokenizer {
                     return 1;
                 }
                 const mtmd_bitmap * bitmap = bitmaps[i_bm++];
-                int32_t res = add_media(bitmap);
+                int32_t res = bitmap->lazy_callback
+                    ? add_lazy_media(bitmap)
+                    : add_media(bitmap);
                 if (res != 0) {
                     return res;
                 }
@@ -773,6 +780,40 @@ struct mtmd_tokenizer {
             };
             cur.entries.emplace_back(std::move(chunk));
         }
+    }
+
+    // expand a lazy bitmap (e.g. video) into a sequence of media/text chunks by
+    // repeatedly invoking its callback until EOF; each returned chunk is added inline
+    int32_t add_lazy_media(const mtmd_bitmap * lazy) {
+        for (size_t i = 0;; i++) {
+            char * out_str = nullptr;
+            mtmd_bitmap * out_bm = nullptr;
+            int res = lazy->lazy_callback(i, lazy->lazy_user_data, &out_bm, &out_str);
+            if (out_bm && out_str) {
+                mtmd_bitmap_free(out_bm);
+                free(out_str);
+                LOG_ERR("%s: lazy callback returned both bitmap and text\n", __func__);
+                return 2;
+            }
+            if (res == 0) {
+                if (out_bm) {
+                    int32_t r = add_media(out_bm);
+                    mtmd_bitmap_free(out_bm);
+                    if (r != 0) {
+                        return r;
+                    }
+                } else if (out_str) {
+                    add_text(out_str, parse_special);
+                    free(out_str);
+                }
+            } else if (res == -1) {
+                break; // EOF
+            } else {
+                LOG_ERR("%s: lazy callback returned error\n", __func__);
+                return 2;
+            }
+        }
+        return 0;
     }
 
     int32_t add_media(const mtmd_bitmap * bitmap) {
@@ -1174,6 +1215,10 @@ int mtmd_get_audio_sample_rate(const mtmd_context * ctx) {
     return clip_get_hparams(ctx->ctx_a)->audio_sample_rate;
 }
 
+const char * mtmd_get_marker(const mtmd_context * ctx) {
+    return ctx->media_marker.c_str();
+}
+
 //
 // public API functions
 //
@@ -1234,6 +1279,20 @@ void mtmd_bitmap_set_id(mtmd_bitmap * bitmap, const char * id) {
     } else {
         bitmap->id.clear();
     }
+}
+
+mtmd_bitmap * mtmd_bitmap_init_lazy(mtmd_context * ctx,
+                                    const char * id,
+                                    void * user_data,
+                                    mtmd_bitmap_lazy_callback callback) {
+    GGML_UNUSED(ctx); // reserved for future use
+    mtmd_bitmap * bitmap = new mtmd_bitmap;
+    bitmap->nx = 0;
+    bitmap->ny = 0;
+    bitmap->lazy_callback  = callback;
+    bitmap->lazy_user_data = user_data;
+    mtmd_bitmap_set_id(bitmap, id);
+    return bitmap;
 }
 
 void mtmd_bitmap_free(mtmd_bitmap * bitmap) {

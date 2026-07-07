@@ -1607,6 +1607,21 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
                 }
                 break;
             case GGML_OP_MUL_MAT_ID:
+                if (std::getenv("GGML_SPACEMIT_SUPPORTS_LOG")) {
+                    const ggml_tensor * w = op->src[0];
+                    const bool is3d  = ggml_n_dims(w) == 3;
+                    const bool onbuf = w->buffer && w->buffer->buft == ggml_backend_cpu_riscv64_spacemit_buffer_type();
+                    const bool repk  = onbuf && ggml_riscv64_spacemit_get_optimal_repack_type(w);
+                    const char * reason = "ok";
+                    if (!is3d)       reason = "not3d";
+                    else if (!onbuf) reason = "not_spm_buf";
+                    else if (!repk)  reason = "no_repack";
+                    else if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) reason = "src1_nonhost";
+                    else if (op->src[1]->type != GGML_TYPE_F32) reason = "src1_notf32";
+                    fprintf(stderr, "SPM_SUPPORTS_ID|%s|%s|%lld|%lld|%lld|%s\n",
+                            w->name, ggml_type_name(w->type),
+                            (long long) w->ne[0], (long long) w->ne[1], (long long) w->ne[2], reason);
+                }
                 if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 3) &&
                     op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_spacemit_buffer_type() &&
                     ggml_riscv64_spacemit_get_optimal_repack_type(op->src[0])) {
@@ -1706,6 +1721,17 @@ static int bind_ai_thread() {
 
     close(fd);
     return 0;
+}
+
+int ggml_backend_cpu_riscv64_spacemit_max_perfer_threads(void) {
+    // When TCM is active each compute thread is bound 1:1 to a preferred (A100/IME2)
+    // core; requesting more threads than preferred cores overflows perfer_core_ids and
+    // aborts in set_numa_thread_affinity. Report the usable cap so callers can clamp.
+    const auto & info = ggml::cpu::riscv64_spacemit::global_spine_env_info;
+    if (info.use_tcm) {
+        return static_cast<int>(info.perfer_core_ids.size());
+    }
+    return 0;  // 0 = no spacemit-imposed limit
 }
 
 void ggml_backend_cpu_riscv64_spacemit_set_numa_thread_affinity(int thread_n) {

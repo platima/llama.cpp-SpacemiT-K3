@@ -2756,6 +2756,17 @@ struct ggml_cplan ggml_graph_plan(
         n_threads = threadpool ? threadpool->n_threads : GGML_DEFAULT_N_THREADS;
     }
 
+#ifdef GGML_USE_CPU_RISCV64_SPACEMIT
+    // Under TCM the backend binds each compute thread 1:1 to a preferred core; clamp so
+    // an over-provisioned thread count (e.g. default hardware_concurrency) can't overflow.
+    {
+        const int spm_max = ggml_backend_cpu_riscv64_spacemit_max_perfer_threads();
+        if (spm_max > 0 && n_threads > spm_max) {
+            n_threads = spm_max;
+        }
+    }
+#endif
+
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
     // Emscripten without pthreads support can only use a single thread
     n_threads = 1;
