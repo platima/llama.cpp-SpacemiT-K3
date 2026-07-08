@@ -1799,10 +1799,12 @@ struct clip_model_loader {
         const bool bf16_to_q8_0 = env_tristate("LLAMA_VISION_BF16_TO_Q8_0", ime_repacks_q8_0) && ime_buft != nullptr;
         // Same IME2 win for mmproj shipped as F16 (e.g. Qwen3-VL / Qwen3.6): F16 mul_mats
         // run on RVV zvfh, not IME2. Quantise 2D F16 vision weights to q8_0 so they repack
-        // onto the int8 engine. Opt-in only (default off) — unlike the bf16 path this trades
-        // a little vision precision that the source didn't already lack; measure before
-        // making default. Override with LLAMA_VISION_F16_TO_Q8_0=1.
-        const bool f16_to_q8_0 = env_tristate("LLAMA_VISION_F16_TO_Q8_0", false) && ime_buft != nullptr && ime_repacks_q8_0;
+        // onto the int8 engine. Default on (matches the bf16 path): a 199-image Qwen3.5-4B
+        // A/B (baseline vs retype, greedy) found 0 accuracy regressions, and the encode is
+        // ~8-12% faster at native resolution (neutral once images are downscaled small
+        // enough that vision-encode is no longer the bottleneck). Opt out with
+        // LLAMA_VISION_F16_TO_Q8_0=0.
+        const bool f16_to_q8_0 = env_tristate("LLAMA_VISION_F16_TO_Q8_0", ime_repacks_q8_0) && ime_buft != nullptr && ime_repacks_q8_0;
         if (bf16_to_q8_0 || f16_to_q8_0) {
             LOG_INF("%s: quantising 2D %s vision weights to q8_0 for IME2 int8 engine\n", __func__,
                     f16_to_q8_0 ? (bf16_to_q8_0 ? "bf16/f16" : "f16") : "bf16");
