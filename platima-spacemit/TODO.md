@@ -1274,6 +1274,59 @@ plain upscale). Repro scripts: `platima-spacemit/run_gemma4uv_size_sweep.sh` (+ 
 ad-hoc `/tmp/vsweep/confirm.sh` pattern). Sweep is slow and TCM-poisoning-prone, so
 `rm -f /dev/shm/tcm_sync_standalone` between runs.
 
+## Patch 25 (DONE 2026-07-06) — mtmd video / frame-sequence support (port of #24269)
+
+Ported upstream #24269 surgically (fork predates the lazy/placeholder-media base it sits
+on): ffmpeg-shelling video helper in `mtmd-helper.{h,cpp}` (vendored `sheredom/subprocess.h`),
+`--video`/`/video` wired through the `load_media` image→video fallback. Verified on
+Gemma 4 E2B/12B and Qwen 3.5 4B. Full detail + the model test matrix and the P3 ceiling
+characterization are below under **"mtmd video port"** — the ceiling is LLM prefill of the
+vision tokens (super-linear in frame count), not the encode, so practical K3 video is a few
+frames of a short clip. Commits `46a7c3f0c` (port), `51d3e3ae3` (P3 doc); merged
+`platima-mtmd-video` → `platima-mtmd` (`e9d24040c`).
+
+## Patch 26 (DONE 2026-07-06) — drafter bf16 → q8_0/f16 retype at load
+
+A bf16 MTP/draft head is catastrophically slow on the K3 (`vec_dot` scalar, no `zvfbfwma`),
+eating MTP's net win. Re-types a *draft/MTP model's* 2D bf16 weights at load — `q8_0` onto
+the IME2 int8 engine when live, else vectorised `f16`; **the main model is never touched**.
+Auto-selected by default (`q8_0` when IME2 present, else `f16`), override
+`LLAMA_DRAFT_BF16_TO=off|f16|q8_0`. The retype forces the draft load to `use_mmap=false`;
+the f32 conversion is row-block chunked to bound peak staging RAM (an earlier probe OOM-killed
+the 12B under global `--no-mmap` + full-f32 staging; chunking + mmapping the main model fixed it).
+
+Touches: `include/llama.h` (tri-state param), `src/llama-model-loader.{h,cpp}` (retype at
+create_tensor + convert in load_all_data), `common/common.{h,cpp}` (`common_apply_draft_retype`,
+env parse, forces draft `use_mmap=false`), wired in `speculative-simple.cpp` + `server-context.cpp`
+(cli + server); `src/llama-model.cpp` default.
+
+A3 probe (Huihui-gemma-4-12B Q4_K main + a genuine-bf16 12B MTP head, `-n 500 ×3`, temp 0):
+bf16 baseline **2.49 t/s** → f16 **6.21 t/s** → **q8_0 7.19 t/s**, all at identical **98.95%**
+accept (377/381). q8_0 wins: +15.8% over f16, 2.89× over bf16 — hence the IME2-present default.
+f16/f32 drafters already run fine and are left alone. Commit `2560b10a9`.
+
+## Patch 27 (DONE 2026-07-07) — vision encode Tier 3: F16 mmproj → q8_0 onto IME2 (default-on)
+
+Extends the patch-21/22 vision retype to mmproj files that are **already F16** (e.g. Qwen 3.5).
+F16 mul_mats otherwise run on the RVV `zvfh` path and never reach IME2; quantizing the 2D F16
+weights to `q8_0` into the spacemit repack buffer dispatches them onto the int8 engine (96 vision
+tensors rerouted on Qwen3.5-4B mmproj-F16). `clip.cpp` — the F16→q8_0 branch mirrors the existing
+bf16→q8_0 Tier 2 hook; env `LLAMA_VISION_F16_TO_Q8_0`, **default-on** where IME2 repacks (matching
+the bf16 default). Commits `91588456d`/`7aa617510` (opt-in), `030503efd` (default-on).
+
+**The win is resolution-dependent** (see memory `project_ime2_vision_win_scales_with_res`):
+~8–12% faster CLIP encode at native (~1600px) resolution or on video; **net-flat** once images
+are downscaled small enough that the encode stops being the wall-clock bottleneck (model load +
+LLM prefill of the vision tokens + generation dominate). Do **not** benchmark this at low res and
+conclude it's useless — that's the resolution effect, not the retype failing.
+
+**Accuracy A/B (199 images, Qwen3.5-4B-Q4_K_M + mmproj-F16, greedy temp 0, `flag=0` vs `flag=1`):**
+199/199 semantically equivalent, **0 regressions**. Weights are identical regardless of resolution,
+so accuracy is resolution-independent; fine-grained recognition preserved (Half Dome, iPhone 5S,
+Snowy Owl, Jackson's Chameleon). Exact-token match is ~0% by design (any weight change reshuffles
+tokens) — the decision metric was semantic categorization, not `cmp`. This 0-regression result is
+why it ships default-on. Driver: `/tmp/acc_ab.sh`. Opt out with `LLAMA_VISION_F16_TO_Q8_0=0`.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)
@@ -1366,7 +1419,7 @@ Tap-mismatch note for future me: I tried the Gemma image test without
 using --jinja` — that's the `common_chat_templates_apply` path
 throwing for Gemma's custom template. Fix is the flag, not the model.
 
-## mtmd video port (branch `platima-mtmd-video`, 46a7c3f0c) — testing matrix (2026-07-06)
+## mtmd video port (patch 25; branch `platima-mtmd-video`, 46a7c3f0c) — testing matrix (2026-07-06)
 
 Ported upstream #24269 video support surgically (fork predates the lazy/placeholder base
 refactor, so cherry-pick was impossible): lazy-bitmap API in `mtmd.{h,cpp}`, standalone

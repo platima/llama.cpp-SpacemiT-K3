@@ -28,6 +28,21 @@ Build check: `llama-cli --version` must show `use_ime2: 1` in the startup banner
 | Gemma 4 12B | net-positive at `n_max=8` | Tuned in patch 10 sweep, +315% sustained tg |
 | Gemma 4 Assistant (E2B / E4B / 12B) | wired | Patch 7 fixes the `--model-draft` MTP path |
 
+### Drafter dtype retype (patch 26)
+
+Many MTP/draft heads ship as **bf16**, whose `vec_dot` is scalar on the K3 `-march` (no
+`zvfbfwma`) — catastrophically slow, which eats MTP's net speedup. Patch 26 re-types a
+*draft/MTP model's* 2D bf16 weights at load: `q8_0` onto the IME2 int8 engine when live,
+else vectorised `f16`. **The main model is never touched.** Auto-selected by default
+(`q8_0` when IME2 present, else `f16`); override with `LLAMA_DRAFT_BF16_TO=off|f16|q8_0`.
+The retype forces the draft load to `use_mmap=false`, and the f32 conversion is
+row-block chunked to bound peak staging RAM.
+
+A3 probe (Huihui-gemma-4-12B Q4_K main + a genuine-bf16 12B MTP head, `-n 500 ×3`,
+temp 0): bf16 baseline 2.49 t/s → f16 6.21 t/s → **q8_0 7.19 t/s** — all at identical
+98.95% accept (377/381). q8_0 wins (+15.8% over f16, 2.89× over bf16), so it is the
+IME2-present default. f16/f32 drafters already run fine and are left alone.
+
 ### Multimodal
 
 | Modality | Status |
@@ -35,8 +50,27 @@ Build check: `llama-cli --version` must show `use_ime2: 1` in the startup banner
 | Vision (mmproj) on Gemma 4 E2B / E4B (`gemma3` projector) | working via `llama-mtmd-cli --jinja --image ...` |
 | Vision (mmproj) on Gemma 4 12B Unified (`gemma4uv` projector) | working — loads after the #24077 cherry-pick; see note below |
 | Audio (mmproj) on Gemma 4 | working via `llama-mtmd-cli --jinja --audio ...` |
+| Video (frame sequences) on Gemma 4 / Qwen 3.5 | working via `llama-mtmd-cli --jinja --video ...` (patch 25); see note below |
 
 End-to-end smoke test results are in [`TODO.md`](TODO.md) under "Functional test".
+
+#### Video (frame-sequence) support — patch 25
+
+Ported upstream #24269 surgically (the fork predates the lazy/placeholder-media base
+that PR sits on). Adds an ffmpeg-shelling video helper in `mtmd-helper.{h,cpp}` (vendored
+`sheredom/subprocess.h`), so `llama-mtmd-cli --video foo.mp4` (or the `/video` command)
+extracts frames and feeds them as an image sequence via the existing `load_media`
+image→video fallback. Verified on Gemma 4 E2B/12B and Qwen 3.5 4B (2 s clips, coherent
+multi-frame descriptions).
+
+**Ceiling is prefill, not encode (P3, 2026-07-07).** Video wall-clock is dominated by the
+LLM **prefill of the vision tokens** (~2200–2300 tokens/frame at 720p), which grows
+super-linearly in frame count (growing-KV attention) — *not* by the CLIP encode. The IME2
+`LLAMA_VISION_F16_TO_Q8_0` retype (below) makes each frame's encode ~8–12% faster but does
+not touch prefill, so practical K3 video today is a few frames of a short clip: a 4B
+2-frame 720p run completes (baseline 170.9 s vs retype 149.7 s), while 8 frames is
+impractical (~30–40 min). Heavy models (27B) are additionally forced to `-ub 128` by
+memory. Details in [`TODO.md`](TODO.md) under "mtmd video port".
 
 #### Gemma 4 12B Unified vision (`gemma4uv`) — patch 23
 
@@ -103,7 +137,7 @@ Any future fusion patch must show ≥ 2% of decode wall-clock in the target regi
 GGML_OP_TIMING=1 llama-speculative-simple ...  2>&1 | grep -A100 GGML_OP_TIMING
 ```
 
-## Vision encode speedup (patch 21)
+## Vision encode speedup (patches 21 / 22 / 27)
 
 Gemma 4 mmproj vision weights ship as **bf16**. The SpacemiT toolchain `-march`
 (`rv64gcv_zfh_zvfh_…`) has vectorised F16 (`zfh`/`zvfh`) but **no** bf16 vector
@@ -118,6 +152,18 @@ path — making the CLIP encode painfully slow.
 and places them in the spacemit repack buffer so the encoder mul_mats dispatch onto the
 IME2 int8 matrix engine. Takes precedence over Tier 1 for the bf16 2D weights it can
 handle (`ne[0] % 32 == 0`); Tier 1 still covers any that don't fit the q8_0 block size.
+
+**Tier 3 — F16→q8_0 (SpacemiT K3 IME2, patch 27).** The same q8_0/IME2 reroute, but for
+mmproj files that are *already F16* (e.g. Qwen 3.5). F16 mul_mats otherwise run on the
+vectorised RVV `zvfh` path and **never** reach IME2; quantizing the 2D F16 weights to
+`q8_0` into the spacemit repack buffer dispatches them onto the int8 engine (96 vision
+tensors rerouted on Qwen3.5-4B mmproj-F16). **Default-on** where IME2 is live (matching
+the bf16 path), env `LLAMA_VISION_F16_TO_Q8_0`. The win is **resolution-dependent**:
+~8–12% faster CLIP encode at native (~1600px) resolution or on video, and net-flat once
+images are downscaled small enough that the encode stops being the wall-clock bottleneck
+(model load + LLM prefill + generation dominate). A 199-image Qwen3.5-4B greedy-decode A/B
+found **0 accuracy regressions** (weights are identical regardless of resolution), which
+is why it ships default-on. Opt out with `LLAMA_VISION_F16_TO_Q8_0=0`.
 
 ### Auto-gating (no flags needed)
 
@@ -134,10 +180,12 @@ Both tiers self-gate on CPU capability — no env var required:
   confirming the IME2 int8 engine is live. (`use_ime2` isn't externally exported, hence
   the probe.)
 
-Override with `LLAMA_VISION_BF16_TO_F16` / `LLAMA_VISION_BF16_TO_Q8_0` set to
-`0`/`false`/`off` to force a tier off, or any other value to force it on. Models whose
-mmproj is already F16 (e.g. Qwen 3.5) have no 2D bf16 weights, so both tiers are a no-op
-there (verified: 0 vision tensors rerouted, encoder stays on the f16/RVV path).
+Override with `LLAMA_VISION_BF16_TO_F16` / `LLAMA_VISION_BF16_TO_Q8_0` /
+`LLAMA_VISION_F16_TO_Q8_0` set to `0`/`false`/`off` to force a tier off, or any other
+value to force it on. Models whose mmproj is already F16 (e.g. Qwen 3.5) have no 2D bf16
+weights, so **Tiers 1 and 2** are a no-op there — but **Tier 3** (F16→q8_0, default-on)
+does reroute those F16 weights onto IME2 (96 tensors on Qwen3.5-4B), so an F16 mmproj is
+no longer left on the RVV path.
 
 ### Measured (IME2 build, auto-gated, `-t 8 --jinja`)
 
@@ -201,7 +249,7 @@ Per-run measurements accumulate in [`results.log`](results.log).
 
 ## Patch history
 
-See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster, Tier 1 — bf16 mmproj weights re-typed to the vectorised F16 RVV path, ~24×), 22 (vision encode Tier 2 — bf16 weights quantized to q8_0 onto the IME2 int8 engine, a further ~1.9×; both tiers now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above), 23 (Gemma 4 12B Unified `gemma4uv` vision enabled via the upstream #24077 cherry-pick; tiny-image misread diagnosed as inherent RISC-V FP × model fragility, not a port bug — see above). Deferred/dismissed: 15 (buffer-unification refactor — dismissed; see TODO), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Each entry records what was tried and why it was kept or dropped.
+See [`TODO.md`](TODO.md). Shipped patches: 1–14, 18 (Gemma4-assistant fit-probe log downgraded ERROR→DEBUG — the "MTP silently falls back" report was a misdiagnosis; MTP already works), 20 (Gemma 4 vision garbled-output fix — the custom IME2 transpose-cont kernel corrupts the vision encoder's F32 `ggml_cont(ggml_transpose(...))`; `GGML_OP_CONT` is now routed to generic CPU), 21 (vision encode faster, Tier 1 — bf16 mmproj weights re-typed to the vectorised F16 RVV path, ~24×), 22 (vision encode Tier 2 — bf16 weights quantized to q8_0 onto the IME2 int8 engine, a further ~1.9×; both tiers now auto-gated on CPU capability via the new `ggml_cpu_vec_dot_is_simd` predicate — see above), 23 (Gemma 4 12B Unified `gemma4uv` vision enabled via the upstream #24077 cherry-pick; tiny-image misread diagnosed as inherent RISC-V FP × model fragility, not a port bug — see above), 25 (mtmd video / frame-sequence support ported from #24269 — see above), 26 (drafter bf16 → q8_0/f16 retype at load, default-on; keeps a bf16 MTP head off the scalar path — see above), 27 (vision encode Tier 3 — F16 mmproj weights → q8_0 onto IME2, default-on; ~8–12% at native resolution, 199-image A/B found 0 accuracy regressions — see above). Deferred/dismissed: 15 (buffer-unification refactor — dismissed; see TODO), 16 (X100 sampling threadpool), 17 (trunk-graph probe — ROPE-RVV and Q4_1 HP-unlock both fail the ≥2%-of-decode gate), 19 (`llama-completion` spec args — the tool has no speculative loop). Document-only: 24 (tiny-image misread is spatial composition, not resolution — an auto-pad would distort non-text inputs; see TODO). Each entry records what was tried and why it was kept or dropped.
 
 The `--version` stamp in `common/arg.cpp` prints the current patch level so a runtime check identifies exactly which patches a deployed binary carries.
 
