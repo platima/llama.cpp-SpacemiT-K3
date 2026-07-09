@@ -177,9 +177,11 @@ Validation (2026-06-14):
   1.67 t/s. Worse than patch 2's 2.2%. Dispatch log line confirms
   `mtp tap: pre_norm (target arch dictates)` so the wiring is correct —
   the hypothesis "Qwen3.5 wants pre-output-norm" is what failed.
-- **Gemma4 E2B/E4B drafters**: regression-test still outstanding. Low
-  priority until we have a working Qwen3.5 path; the nextn path is the
-  pre-patch behavior for Gemma4 so no regression is expected.
+- **Gemma4 E2B/E4B drafters**: no regression (superseded by later work).
+  Patch 7 verified Gemma 4 E2B end-to-end runs cleanly and patches 4/5/6 did
+  not regress the Gemma path; the patch-10 `n_max` sweep then made E2B (`n_max=2`)
+  and E4B (`n_max=3`) net-positive. The nextn path is Gemma4's pre-patch behavior,
+  so no regression was expected and none was found.
 
 ### Patch 5 (shipped 2026-06-14, partial fix — only ~2x improvement)
 
