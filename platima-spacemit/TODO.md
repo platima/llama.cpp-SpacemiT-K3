@@ -2,7 +2,7 @@
 
 Tracking items deferred from the Gemma4 MTP cherry-pick work.
 
-## Patch history on branch `platima-mtmd` (on top of SpacemiT release 0.1.3 / upstream base `354ebac8c`)
+## Patch history on branch `platima-mtmd` (on top of SpacemiT release 0.1.6 / upstream base `354ebac8c`)
 
 - **patch 1**: Cherry-pick of Gemma4 MTP (#23398) and Gemma4 E2B/E4B assistants
   (#24282) from upstream; SpacemiT toolchain flags codified in `build.sh` and
@@ -1328,6 +1328,34 @@ so accuracy is resolution-independent; fine-grained recognition preserved (Half 
 Snowy Owl, Jackson's Chameleon). Exact-token match is ~0% by design (any weight change reshuffles
 tokens) — the decision metric was semantic categorization, not `cmp`. This 0-regression result is
 why it ships default-on. Driver: `/tmp/acc_ab.sh`. Opt out with `LLAMA_VISION_F16_TO_Q8_0=0`.
+
+## Patch 28 (DONE 2026-07-09) — merge SpacemiT release 0.1.3 → 0.1.6 (skip OHOS)
+
+Cherry-picks the SpacemiT `v0.1.3 → v0.1.6` delta (branch `platima-mtmd-smt-0.1.6`) onto
+`platima-mtmd`, bumping the fork's SpacemiT base from 0.1.3 to 0.1.6. Cherry-pick (not
+tag-merge) because the `v0.1.3` tag isn't in `platima-mtmd`'s ancestry — a tag-merge would
+drag 0.1.0–0.1.3 back as duplicate-SHA conflicts. `VERSION_NUMBER` → `0.1.6`. Eight commits
+landed; **OHOS (#16, and #17's OHOS hunks) skipped** per user (no OpenHarmony target here):
+
+- **#8** `feat(mtmd): FunASR fbank + LFR audio encoding path` — audio front-end.
+- **#9** `feat(mtmd): Qwen2VL SMT patch preprocessing`.
+- **#10** `server: LFM2 SMT vision support`.
+- **#11** `feat(spacemit): TCM memory barrier support` — replaces per-thread TLS
+  `tcm_buffer` wait/release with explicit `_wait_all(n)`/`_release_all(n)` over all threads
+  (`ime.h`/`ime.cpp`, called from `ggml-cpu.c`); old `clear_numa_thread_affinity_threaded`
+  now a no-op stub. Fork's thread auto-clamp (`max_perfer_threads()`) verified intact.
+- **#13** `ggml: logical worker lanes for trace profiling` — conflicted with the fork's
+  `GGML_OP_TIMING` probe (patch 14) at the same site; both kept (independent/additive).
+- **#15** `fix(spacemit): MiniCPM-V SMT multimodal inference on RISC-V`.
+- **#17** `docs(mtmd): multimodal model development guide` — docs-only slice
+  (`docs/spacemit-mtmd-model-development.md` + link); OHOS build-workflow hunks dropped.
+- **#18** `fix(server): hybrid-recurrent SMT multimodal crash + drop temp-file round-trip` —
+  adds `prompt_cache_reuse_unsafe()` guard (additive); the dropped temp-file round-trip is in
+  the ONNX smt-vision-wrapper, not our ffmpeg video helper.
+
+Build green (`-j3`); functional matrix (vision / audio / video / text) all pass with no
+crashes/aborts — which also validates the #11 TCM barrier refactor (a broken barrier would
+crash every A100 run). `--version` stamp → patch 28, `SpacemiT base: 0.1.6`.
 
 ## K3 A100 / X100 improvements observed during the merge
 
