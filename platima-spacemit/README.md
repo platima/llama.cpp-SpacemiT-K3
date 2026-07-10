@@ -4,6 +4,8 @@ A fork of [`llama.cpp`](https://github.com/ggml-org/llama.cpp) tracking the Spac
 
 Work branch: **`platima-mtmd`**. The `master` branch tracks upstream `ggml-org/llama.cpp:master` with none of these patches applied — it's kept clean so rebasing onto a newer upstream tip is straightforward.
 
+> **Companion docs:** [`MODELS.md`](MODELS.md) is the model-centric guide (which model runs on which core, in which compute format, and what's actually been validated on K3 hardware). This README is organized by feature; [`TODO.md`](TODO.md) is the full patch-by-patch changelog.
+
 ## Hardware target
 
 SpacemiT K3 SoC:
