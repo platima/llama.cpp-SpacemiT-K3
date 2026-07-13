@@ -1467,18 +1467,26 @@ Model test matrix (video = frame-sequence understanding; all have mmproj on hand
 | gemma-4-E4B | gemma4v+4a | ✓ tested | ✓ tested (4s clip, coherent) | ✓ tested (test-2.mp3, patch history) | done |
 | gemma-4-E2B | gemma4v+4a | — | ✓ **PASS** (2s clip, coherent: man+grill/smoker) | — | video done |
 | gemma-4-12B | gemma4uv | ✓ re-tested (Test3.jpg, no regression) | ✓ **PASS** (2s clip, detailed: man+smoker+attire) | — | video+img done |
-| gemma-4-26B-A4B | gemma4 MoE | — | ⚠ port engaged, decode too slow to finish (>33min, no gen; likely Q3_K MoE experts miss IME2) | — | port ok, impractical |
+| gemma-4-26B-A4B | gemma4 MoE | — | ⚠ port engaged, decode too slow to finish (>33min, no gen; IQ experts miss IME2 → RVV, see measured note below) | — | port ok, impractical |
 | Qwen3-VL-8B | qwen3vl | ✓ tested | ⚠ port engaged, encode too slow to finish (>41min; 1024+ tok/frame high-res) | n/a (no audio) | port ok, impractical |
-| Qwen3.5 9B/4B/2B (+MTP) | qwen3.5 | — | ✓ **PASS** (4B: 0.5s/2-frame completes+coherent; 8-frame impractical ~30–40min, prefill-bound — see P3 note) | n/a (no audio) | video done (4B) |
-| Qwen3.6-27B/35B-A3B-MTP | qwen3.6 | — | ⚠ engages; 8-frame 720p times out (>25min, prefill-bound; 12.5 GB model forces `-ub 128`) — see P3 note | n/a | port ok, impractical @8f |
+| Qwen3.5 9B/4B/2B (+MTP) | qwen35 | — | ✓ **PASS** (4B: 0.5s/2-frame completes+coherent; 8-frame impractical ~30–40min, prefill-bound — see P3 note) | n/a (no audio) | video done (4B) |
+| Qwen3.6-27B/35B-A3B-MTP | qwen35/qwen35moe | — | ⚠ engages; 8-frame 720p times out (>25min, prefill-bound; 12.5 GB model forces `-ub 128`) — see P3 note | n/a | port ok, impractical @8f |
 
 **Video test results (2026-07-06):** port works on every arch exercised — fallback
 (`image decode failed` → video init) fires correctly and frames encode. **Full coherent
 completions** on the light/mid models: gemma E2B, gemma 12B (gemma4uv), Qwen3.5-4B (best
 result — captured the propane-torch action across frames). Heavy models (gemma 26B-A4B
 MoE, Qwen3-VL-8B) engage the port and compute (no crash, memory safe under mmap) but are
-**too slow to complete on K3** — 26B likely because Q3_K MoE experts skip IME2 repack,
-Qwen3VL because it needs 1024+ vision tokens/frame. Not port bugs; a throughput ceiling.
+**too slow to complete on K3** — the MoE ceiling is now **measured** (2026-07-13, decode of
+Qwen3.6-35B-A3B UD-Q2_K_XL under `GGML_SPACEMIT_SUPPORTS_LOG=1`): the Unsloth "Dynamic"
+quant stores ~99% of experts as **IQ types** (iq2_xs / iq3_xxs / iq4_xs, 240/246 tensors),
+all of which report `no_repack` → they run on **RVV, not IME2**. The few non-IQ experts
+(block 40, q2_K/q3_K) correctly report `ok` → **they DO hit IME2**. So the earlier
+"Q3_K experts skip IME2" guess was wrong: K-quant experts repack fine; the throughput
+ceiling is the **IQ** experts. No-code fix — prefer a straight **Q2_K/Q3_K GGUF** (K-quant
+experts, ~same size as the IQ mix, IME2-accelerated) over the "Dynamic" IQ quant. A
+persistent IQ→q8_0 repack is infeasible (2.3-bit → 8.5-bit ≈ 3.7× the model, blows 16 GB).
+Qwen3VL is a separate ceiling — it needs 1024+ vision tokens/frame. Not port bugs.
 Config: `-c 16384 -fa 1 --temp 0` (main model mmap'd, no `--no-mmap`, so KV+staging fit
 under 16 GB); default context (`101120`) OOMs — must cap `-c`. 2s clip ≈ 8 frames at 4fps.
 

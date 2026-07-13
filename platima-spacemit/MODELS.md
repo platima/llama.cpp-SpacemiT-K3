@@ -15,7 +15,7 @@ The K3 SoC has two RISC-V core complexes:
 
 | Cores | Complex | Capabilities | Used for compute? |
 |---|---|---|---|
-| 8–15 | **A100** AI cores | RVV + **IME2** int8 matrix engine + TCM | **Yes** — all graph compute is pinned here (`cpu_mask ff00`, requires `-t 8`) |
+| 8–15 | **A100** AI cores | RVV + **IME2** int8 matrix engine + TCM | **Yes** — all graph compute is pinned here (`cpu_mask ff00`; graph threads auto-clamp to the 8 preferred cores) |
 | 0–7 | **X100** app cores | RVV only (no IME2) | **No** — idle by design; offloading probed and rejected (patch 16, [TODO](TODO.md)) |
 
 So the "core" column below is **A100 for every model** — the meaningful lever is not *which*
@@ -27,7 +27,7 @@ core but *which compute path* the weights dispatch to on the A100:
 | **IQ**-quants (`IQ2_XXS`, `IQ4_XS`, …) | RVV vector | slower | not in the IME2 repack set — prefer a K-quant |
 | `f16` | RVV `zvfh` vector | fast | vectorised, but not IME2 |
 | `bf16` | **scalar** (no `zvfbfwma`) | catastrophic | retyped away at load — see below |
-| IQ-quant **MoE experts** | RVV (no IME2 repack) | slower | prefer non-IQ expert quants |
+| IQ-quant **MoE experts** | RVV (no IME2 repack) | slower | measured: Qwen3.6 UD-Q2_K_XL stores ~99% experts as IQ2/IQ3 → RVV; a straight `Q2_K`/`Q3_K` GGUF keeps experts on IME2 at ~same size |
 
 Because bf16 is scalar-only on this `-march`, the fork **retypes bf16 weights at load** so they
 never hit the scalar path: vision mmproj (patches 21/22/27) and MTP/draft heads (patch 26) are
@@ -48,7 +48,7 @@ dispatch for a normal quant of that model.
 | Qwen 3.5 (0.8B/2B/4B/9B) | `qwen35` | Q4_K/Q6_K → IME2 int8 | ✅ post-norm tap (patch 5) | ✅ text + MTP |
 | Qwen 3.5 MoE | `qwen35moe` | Q4_K → IME2 (non-IQ experts) | ✅ same tap dispatch | ✅ wired |
 | Qwen 3.6 27B | `qwen35` | Q3_K → IME2 int8 | ✅ (inherits qwen35) | — arch supported (35B-A3B validated instead) |
-| Qwen 3.6 35B-A3B (MoE) | `qwen35moe` | Q2_K → IME2 int8 | ✅ (inherits qwen35moe) | ✅ text + MTP |
+| Qwen 3.6 35B-A3B (MoE) | `qwen35moe` | K-quant experts → IME2; **IQ experts → RVV** | ✅ (inherits qwen35moe) | ✅ text + MTP |
 | Gemma 4 E2B / E4B / 12B | `gemma4` | Q4_0 (QAT) → IME2 int8 | ✅ tuned n_max (patch 10) | ✅ text + MTP |
 | Gemma 4 26B-A4B (MoE) | `gemma4` | Q4_0 → IME2 int8 | ✅ wired | — text only |
 | Gemma 4 Assistant (E2B/E4B/12B) | `gemma4` | Q4_0 → IME2 int8 | ✅ `--model-draft` path (patch 7) | ✅ wired |
@@ -98,7 +98,7 @@ smoke (loads + coherent output), not a benchmark unless noted.
 | Gemma 4 12B | Q4_0 QAT | text + MTP + vision | `gemma4`/`gemma4uv` | ✅ +315% tg; tiny-image caveat (patch 24) |
 | Huihui Gemma 4 12B | Q4_K + bf16 MTP head | MTP (drafter dtype) | `gemma4` | ✅ q8_0 7.19 t/s, 98.95% accept |
 | Qwen3-VL 8B Thinking | Q4_K_M + Q8_0 mmproj | image | `qwen3vl` | ✅ accurate scene; downscale input (ViT scales w/ resolution) |
-| Qwen 3.6 35B-A3B | Q2_K_XL | text + MTP | `qwen35moe` | ✅ coherent; MTP fires (nextn tap); Q2_K MoE slow on K3 |
+| Qwen 3.6 35B-A3B | UD-Q2_K_XL | text + MTP | `qwen35moe` | ✅ coherent; MTP fires (nextn tap); slow — "Dynamic" quant's experts are **IQ2/IQ3 → RVV, not IME2** (use a straight Q2_K/Q3_K GGUF for IME2 experts) |
 
 Modalities covered on the mmproj path: **text ✅ · image ✅ · audio ✅ · video ✅**. No mtmd
 modality is missing.
@@ -161,6 +161,8 @@ $CLI -m model.gguf --mmproj mmproj.gguf --audio clip.mp3 -p "Transcribe this aud
 $CLI -m model.gguf --mmproj mmproj.gguf --video clip.mp4 -p "Describe the video." --jinja -t 8 -fa 1 -ub 512
 ```
 
-`-t 8` is mandatory (the spacemit affinity path aborts above 8 threads). `rm -f
-/dev/shm/tcm_sync_standalone` before a run if a prior spacemit process aborted mid-barrier
-(see [`README.md`](README.md) "Known issues").
+Graph threads **auto-clamp to the 8 A100/IME2 preferred cores** (patch 28,
+`ggml_backend_cpu_riscv64_spacemit_max_perfer_threads`), so an over-provisioned `-t` no
+longer aborts the affinity path — passing `-t 8` is optional but recommended for explicit,
+deterministic runs. `rm -f /dev/shm/tcm_sync_standalone` before a run if a prior spacemit
+process aborted mid-barrier (see [`README.md`](README.md) "Known issues").
