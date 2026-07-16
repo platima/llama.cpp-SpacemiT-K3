@@ -14,10 +14,10 @@ void llama_model_hy_v3::load_arch_hparams(llama_model_loader & ml) {
     }
 
     // NextN/MTP (HY V3): extra decoder block(s) appended beyond the main stack
-    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
-    GGML_ASSERT(hparams.n_layer_nextn < hparams.n_layer_all && "n_layer_nextn must be < n_layer_all");
+    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.nextn_predict_layers, false);
+    GGML_ASSERT(hparams.nextn_predict_layers < hparams.n_layer && "nextn_predict_layers must be < n_layer");
 
-    switch (hparams.n_layer()) {
+    switch (hparams.n_layer - hparams.nextn_predict_layers) {
         case 48: type = LLM_TYPE_30B_A3B; break;
         default: type = LLM_TYPE_UNKNOWN;
     }
@@ -26,12 +26,17 @@ void llama_model_hy_v3::load_arch_hparams(llama_model_loader & ml) {
 void llama_model_hy_v3::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+    // In this fork, hparams.n_layer counts TOTAL layers (trunk + nextn). The
+    // trunk (main) stack is the first n_main; the MTP/NextN blocks occupy
+    // [n_main, n_layer). (Mirrors qwen35moe.)
+    const uint32_t n_main = n_layer - hparams.nextn_predict_layers;
+
+    const bool mtp_only = (hparams.nextn_predict_layers > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
     // Trunk-only: the GGUF declares MTP layers in metadata but the actual MTP
     // tensors live in a separate file (e.g. user split target/draft). Mark
     // MTP tensors NOT_REQUIRED so the trunk loads cleanly.
-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+    const std::string mtp_probe = "blk." + std::to_string(n_main) + ".nextn.eh_proj.weight";
+    const bool trunk_only = (hparams.nextn_predict_layers > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
     const int trunk_flags = mtp_only   ? TENSOR_NOT_REQUIRED : 0;
     const int mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
 
@@ -75,12 +80,12 @@ void llama_model_hy_v3::load_arch_tensors(llama_model_loader & ml) {
         layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp, n_embd}, TENSOR_NOT_REQUIRED);
     };
 
-    for (int i = 0; i < n_layer; ++i) {
+    for (int i = 0; i < (int) n_main; ++i) {
         load_block(i, trunk_flags);
     }
 
     // NextN/MTP block(s): a full hy_v3 decoder block plus the NextN projections.
-    for (int i = n_layer; i < n_layer_all; ++i) {
+    for (int i = (int) n_main; i < n_layer; ++i) {
         auto & layer = layers[i];
 
         load_block(i, mtp_flags);
@@ -120,7 +125,8 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
-    for (int il = 0; il < n_layer; ++il) {
+    const int n_transformer_layers = n_layer - (int) hparams.nextn_predict_layers;
+    for (int il = 0; il < n_transformer_layers; ++il) {
         ggml_tensor * inpSA = inpL;
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
@@ -148,7 +154,7 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
             cb(cur, "attn_out", il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
+        if (il == n_transformer_layers - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -238,16 +244,17 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
 //   MTP head or MTP embeddings).
 llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params)
     : llm_graph_context(params) {
-    GGML_ASSERT(hparams.n_layer_nextn > 0 && "HY_V3 MTP requires n_layer_nextn > 0");
+    GGML_ASSERT(hparams.nextn_predict_layers > 0 && "HY_V3 MTP requires nextn_predict_layers > 0");
+    GGML_ASSERT(hparams.nextn_predict_layers == 1 && "HY_V3 MTP currently only supports a single MTP block");
 
     const int64_t n_embd_head = hparams.n_embd_head_v();
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
     GGML_ASSERT(n_embd_head == n_rot);
 
-    const int il = hparams.n_layer() + cparams.nextn_layer_offset;
-    GGML_ASSERT(cparams.nextn_layer_offset >= 0 &&
-                cparams.nextn_layer_offset < (int) hparams.n_layer_nextn &&
-                "nextn_layer_offset out of range [0, n_layer_nextn)");
+    // In this fork the MTP/NextN block occupies the first slot after the trunk:
+    // il = n_main = n_layer - nextn_predict_layers (mirrors qwen35moe). There is
+    // no cparams.nextn_layer_offset here; a single MTP block => offset 0.
+    const int il = (int) hparams.n_layer - (int) hparams.nextn_predict_layers;
     const auto & layer = model.layers[il];
 
     GGML_ASSERT(layer.nextn.eh_proj && "MTP block missing nextn.eh_proj");
