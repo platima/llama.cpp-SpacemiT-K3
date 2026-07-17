@@ -47,7 +47,7 @@ struct llama_cparams {
     bool kv_unified;
     bool pipeline_parallel;
 
-    std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+    std::vector<bool> embeddings_layer_inp; // [n_layer - nextn_predict_layers] extract input embeddings for layer
 
     enum llama_context_type ctx_type;
     enum llama_pooling_type pooling_type;

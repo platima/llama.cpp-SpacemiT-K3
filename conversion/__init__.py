@@ -132,6 +132,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "LlamaForCausalLM": "llama",
     "LlamaModel": "llama",
     "Eagle3DraftModel": "llama",
+    "Eagle3LlamaForCausalLM": "llama",
     "Eagle3Speculator": "llama",
     "LlamaForCausalLMEagle3": "llama",
     "LlavaForConditionalGeneration": "llama",

@@ -81,8 +81,10 @@ llama_context::llama_context(
     cparams.no_perf                    = params.no_perf;
     cparams.warmup                     = false;
 
-    cparams.embeddings_layer_inp.resize(hparams.n_layer(), false);
-    embd_layer_inp.resize(hparams.n_layer());
+    // Fork MTP convention: hparams.n_layer is TOTAL layers (trunk + nextn/MTP).
+    // The upstream trunk accessor hparams.n_layer() maps to the trunk count here.
+    cparams.embeddings_layer_inp.resize(hparams.n_layer - hparams.nextn_predict_layers, false);
+    embd_layer_inp.resize(hparams.n_layer - hparams.nextn_predict_layers);
 
     cparams.ctx_type     = params.ctx_type;
     cparams.pooling_type = params.pooling_type;
@@ -1200,7 +1202,7 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
 
-    GGML_ASSERT(lid < model.hparams.n_layer());
+    GGML_ASSERT(lid < model.hparams.n_layer - model.hparams.nextn_predict_layers);
 
     cparams.embeddings_layer_inp[lid] = enable;
 
