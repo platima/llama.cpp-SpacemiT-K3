@@ -1357,6 +1357,35 @@ Build green (`-j3`); functional matrix (vision / audio / video / text) all pass 
 crashes/aborts — which also validates the #11 TCM barrier refactor (a broken barrier would
 crash every A100 run). `--version` stamp → patch 28, `SpacemiT base: 0.1.6`.
 
+## Patch 29 (DONE 2026-07-17) — two new K3 multimodal models: DeepSeek-OCR-2 + Granite Speech Plus
+
+Both arches were already code-present in the 0.1.6 mtmd lineage; patch 29 makes them actually
+**run on the K3**. Validated on hardware (Matrix B in [`MODELS.md`](MODELS.md)).
+
+- **DeepSeek-OCR-2** (`deepseek2-ocr` text + `deepseekocr2` vision projector). Loaded but
+  **crashed in clip warmup**: `GGML_ASSERT(*cur_backend_id != -1)` (`ggml-backend.cpp:1242`).
+  Root cause was **our own** vision-retype (patches 21/22/27): it q8_0's every 2D bf16/f16
+  mmproj weight with `ne[0]%32==0` into the spacemit IME2 buffer — but `resample_query_*` are
+  learned **data** embeddings (fed to `ggml_cast`/`CPY`, not `mul_mat`), and the IME2 buffer's
+  `supports_op` only claims MUL_MAT(_ID), so the CPY had no backend → abort. Fix
+  (`tools/mtmd/clip.cpp`): exclude `resample_query` from the retype so it stays bf16 in the
+  normal buffer. Result: vision encoder runs; model OCR'd image text ("Vecteezy"). The retype
+  is for matmul weights only — see the vision-retype-data-tensor gotcha.
+- **Granite Speech 4.1 2B Plus** (`granite_speech` audio projector). Fork had base
+  granite-speech but not the "Plus" **multi-layer feature concat** (upstream #24818). Ported:
+  added an ordered `feature_layers` list + `is_feature_layer()` to clip hparams (kept separate
+  from the existing set-based vision path), parse `clip.audio.feature_layer`, and the concat in
+  `granite-speech.cpp` (`proj_input_dim = n_embd*(feature_layers+1) = 2048`, matching the
+  projector `cross_attn_k/v` `[2048,1024]`). No K3 backend fix needed — the concat tensors are
+  graph-internal, not disk weights, so they never hit the retype heuristic. Result: coherent
+  audio transcription. `--version` stamp → patch 29.
+
+**Deferred (not in this patch):** EAGLE3 speculative decode (fork has only a disabled no-op
+stub; full 4-commit port pending a K3-fitting draft+target — e.g. AngelSlim `Qwen3-4B_eagle3`
+draft + a base Qwen3-4B target). Hy3 + Cohere2-MoE text arches are ported + build-green on
+branch `platima-mtmd-models-text` but **not K3-runnable** (Hy3 90 GB; no Cohere2 models exist)
+— kept off mainline.
+
 ## K3 A100 / X100 improvements observed during the merge
 
 - **X100 cores are unused.** The current SpacemiT backend (`ggml-cpu/spacemit/`)

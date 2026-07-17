@@ -67,6 +67,8 @@ dispatch for a normal quant of that model.
 | Qwen2-VL | `qwen2vl` | vision | (SMT patch preproc #9) | — arch supported |
 | MiniCPM-V | `minicpmv` | vision | (RISC-V fix #15) | — arch supported |
 | LFM2 | `lfm2` / `lfm2a` | vision | (SMT vision #10) | — arch supported |
+| DeepSeek-OCR-2 | `deepseekocr2` | vision (OCR) | bf16 → q8_0/IME2 (weights only; `resample_query` kept bf16, patch 29) | ✅ image OCR |
+| Granite Speech 4.1 2B Plus | `granite_speech` | audio | f16 → q8_0/IME2 (Tier 3) | ✅ audio (patch 29 concat) |
 
 > The upstream `clip.cpp` in this fork registers ~40 projector types (Pixtral, InternVL,
 > Idefics3, GLM4V, Phi4, Kimi-VL, etc.). They are **code-supported** by inheritance but **not
@@ -99,6 +101,8 @@ smoke (loads + coherent output), not a benchmark unless noted.
 | Huihui Gemma 4 12B | Q4_K + bf16 MTP head | MTP (drafter dtype) | `gemma4` | ✅ q8_0 7.19 t/s, 98.95% accept |
 | Qwen3-VL 8B Thinking | Q4_K_M + Q8_0 mmproj | image | `qwen3vl` | ✅ accurate scene; downscale input (ViT scales w/ resolution) |
 | Qwen 3.6 35B-A3B | UD-Q2_K_XL | text + MTP | `qwen35moe` | ✅ coherent; MTP fires (nextn tap); slow — "Dynamic" quant's experts are **IQ2/IQ3 → RVV, not IME2** (use a straight Q2_K/Q3_K GGUF for IME2 experts) |
+| DeepSeek-OCR-2 | bf16 + bf16 mmproj | image (OCR) | `deepseek2-ocr` | ✅ OCR'd image text; needed patch 29 (`resample_query` kept out of IME2 buffer) |
+| Granite Speech 4.1 2B Plus | bf16 + f16 mmproj | audio | `granite` / `granite_speech` | ✅ coherent transcription; patch 29 multi-layer feature concat |
 
 Modalities covered on the mmproj path: **text ✅ · image ✅ · audio ✅ · video ✅**. No mtmd
 modality is missing.
