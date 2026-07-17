@@ -1832,11 +1832,26 @@ struct clip_model_loader {
             if (cur) {
                 tensors_to_load.push_back(cur);
                 ggml_tensor * data_tensor;
+                // Some 2D vision tensors match the "mul_mat weight" retype heuristic
+                // below but are NOT mul_mat weights: the DeepSeek-OCR-2 resample query
+                // embeddings (v.resample_query_*) are learned data tensors that are
+                // ggml_cast()'d to F32 and ggml_concat()'d (see models/deepseekocr2.cpp).
+                // Repacking them into the spacemit IME2 q8_0 buffer is wrong on two
+                // counts: (1) the buffer's set_tensor scrambles the bytes into a 32x32
+                // IME layout that the generic CPY/dup kernel can't dequantize, and the
+                // spacemit extra-buffer supports_op only claims MUL_MAT/MUL_MAT_ID, so
+                // the cast (GGML_OP_CPY, q8_0->f32) becomes unplaceable and aborts the
+                // scheduler; (2) it would lossily int8-quantize learned query embeddings.
+                // Keep such data tensors out of the IME retype so they stay in the normal
+                // buffer and the cast runs on the generic CPU path.
+                const bool is_vision_data_tensor =
+                    name.find("resample_query") != std::string::npos;
                 // Tier-2 vision speedup (SpacemiT K3): quantise 2D bf16 mul_mat weights
                 // to q8_0 in the spacemit ime context so they repack onto the IME2 int8
                 // engine. q8_0 needs ne[0] % 32 == 0 (block size). Data is read bf16,
                 // converted to f32 and quantised in the load loop below.
-                if (((bf16_to_q8_0 && cur->type == GGML_TYPE_BF16) ||
+                if (!is_vision_data_tensor &&
+                    ((bf16_to_q8_0 && cur->type == GGML_TYPE_BF16) ||
                      (f16_to_q8_0  && cur->type == GGML_TYPE_F16)) && ggml_n_dims(cur) == 2 &&
                     cur->ne[0] % 32 == 0) {
                     data_tensor = ggml_new_tensor_2d(ctx_clip.ctx_data_ime.get(), GGML_TYPE_Q8_0, cur->ne[0], cur->ne[1]);
