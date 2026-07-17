@@ -1628,6 +1628,10 @@ struct clip_model_loader {
                         get_u32(KEY_A_PROJ_WINDOW_SIZE,     hparams.audio_proj_window_size);
                         get_u32(KEY_A_PROJ_DOWNSAMPLE_RATE, hparams.audio_proj_downsample_rate);
                         get_u32(KEY_A_PROJ_HEAD_COUNT,      hparams.audio_proj_head_count);
+                        // granite-speech-plus: optional ordered feature layers whose encoder
+                        // outputs are concatenated (with the final layer) as the projector input.
+                        // Non-plus models omit this key, leaving feature_layers empty.
+                        get_arr_int(string_format(KEY_FEATURE_LAYERS, "audio"), hparams.feature_layers, false);
                     } break;
                 case PROJECTOR_TYPE_JANUS_PRO:
                     {
@@ -1692,6 +1696,13 @@ struct clip_model_loader {
                 LOG_INF("%s: audio_n_fft:        %d\n", __func__, hparams.audio_n_fft);
                 LOG_INF("%s: audio_window_len:   %d\n", __func__, hparams.audio_window_len);
                 LOG_INF("%s: audio_hop_len:      %d\n", __func__, hparams.audio_hop_len);
+                if (!hparams.feature_layers.empty()) {
+                    LOG_INF("%s: feature_layers:     ", __func__);
+                    for (auto & layer : hparams.feature_layers) {
+                        LOG_INF("%d ", layer);
+                    }
+                    LOG_INF("\n");
+                }
             }
             LOG_INF("\n");
             LOG_INF("%s: model size:         %.2f MiB\n", __func__, model_size / 1024.0 / 1024.0);

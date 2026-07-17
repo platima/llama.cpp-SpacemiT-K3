@@ -46,6 +46,8 @@
 #define KEY_IMAGE_MEAN          "clip.vision.image_mean"
 #define KEY_IMAGE_STD           "clip.vision.image_std"
 #define KEY_FEATURE_LAYER       "clip.vision.feature_layer"
+// prefixed feature-layer key (e.g. "clip.audio.feature_layer" for granite-speech-plus)
+#define KEY_FEATURE_LAYERS      "clip.%s.feature_layer"
 #define KEY_PROJ_SCALE_FACTOR   "clip.vision.projector.scale_factor"
 #define KEY_SPATIAL_MERGE_SIZE  "clip.vision.spatial_merge_size"
 #define KEY_IS_DEEPSTACK_LAYERS "clip.vision.is_deepstack_layers"

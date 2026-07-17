@@ -4,6 +4,7 @@
 #include "clip.h"
 #include "clip-impl.h"
 
+#include <algorithm>
 #include <array>
 #include <vector>
 #include <unordered_set>
@@ -91,6 +92,9 @@ struct clip_hparams {
     float eps = 1e-6;
     float rope_theta = 0.0;
     std::unordered_set<int32_t> vision_feature_layer;
+    // ordered feature-layer indices for multi-layer concatenation (granite-speech-plus);
+    // kept ordered (unlike the set above) so the encoder concatenates layers in index order
+    std::vector<int32_t> feature_layers;
     int32_t attn_window_size = 0;
     int32_t n_wa_pattern = 0;
     std::unordered_set<int32_t> wa_layer_indexes; // explicit layer indexes that use full attention (for irregular patterns like YoutuVL)
@@ -157,6 +161,11 @@ struct clip_hparams {
         }
 
         return false;
+    }
+
+    // membership test over the ordered feature_layers list (granite-speech-plus)
+    bool is_feature_layer(int32_t layer) const {
+        return std::find(feature_layers.begin(), feature_layers.end(), layer) != feature_layers.end();
     }
 };
 
