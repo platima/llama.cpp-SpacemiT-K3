@@ -72,15 +72,23 @@ dispatch for a normal quant of that model.
 
 > The upstream `clip.cpp` in this fork registers ~40 projector types (Pixtral, InternVL,
 > Idefics3, GLM4V, Phi4, Kimi-VL, etc.). They are **code-supported** by inheritance but **not
-> K3-validated** — treat anything not in Matrix B as untested on this hardware.
+> K3-validated** — treat anything not in Matrix B as untested on this hardware. "Code-supported"
+> is not a promise: **Kimi-VL** was tested and its projector is fine, but its `deepseek2` text
+> backbone emits garbage on this board (see Matrix B), so the model is unusable regardless.
 
 ### Second (ONNX) multimodal path — not built here
 
 There is a separate SpacemiT **ONNX-Runtime wrapper path** (`mtmd-cli-smt`,
 `smt-vision-wrapper`, `smt-audio-wrapper`) gated behind `LLAMA_SERVER_SMT_VISION=ON` +
 `SPACEMIT_ORT_DIR`. Our build does **not** enable it (no ORT SDK, no `.onnx` encoders on disk),
-so it is entirely **untested by us**. SpacemiT's newest commits (#19 Gemma4-audio, #20 Qwen3-VL,
-#21 cleanup) target only this path and have **no effect on the A100/X100 mmproj path** above.
+so it is entirely **untested by us**. SpacemiT's #19 (Gemma4-audio), #20 (Qwen3-VL) and #21
+(cleanup) target only this path and have **no effect on the A100/X100 mmproj path** above.
+
+> **Do not generalise that to the whole spacemit remote.** Release **0.1.7** is *not*
+> ONNX-only: `#25` (mtmd media refactor) adds a `gemm_m == 1` — i.e. **decode** — fast path in
+> `ggml-cpu/spacemit/ime.cpp` for q4_0/q8_0 that streams directly through TCM, plus new RVV
+> `GELU`/`TANH`/`GEGLU` kernels in `rvv_kernels.cpp`; `#27` (Qwen3-TTS) also touches `ime.cpp`.
+> Those are real A100-path changes and are worth cherry-picking.
 
 ---
 
@@ -103,9 +111,46 @@ smoke (loads + coherent output), not a benchmark unless noted.
 | Qwen 3.6 35B-A3B | UD-Q2_K_XL | text + MTP | `qwen35moe` | ✅ coherent; MTP fires (nextn tap); slow — "Dynamic" quant's experts are **IQ2/IQ3 → RVV, not IME2** (use a straight Q2_K/Q3_K GGUF for IME2 experts) |
 | DeepSeek-OCR-2 | bf16 + bf16 mmproj | image (OCR) | `deepseek2-ocr` | ✅ OCR'd image text; needed patch 29 (`resample_query` kept out of IME2 buffer) |
 | Granite Speech 4.1 2B Plus | bf16 + f16 mmproj | audio | `granite` / `granite_speech` | ✅ coherent transcription; patch 29 multi-layer feature concat |
+| Qwen3-4B + AngelSlim EAGLE3 | Q4_K_M + f16 draft | text + EAGLE3 | `qwen3` / `eagle3` | ⚠️ loads & runs (patch 30) but **0–1.4% accept — not usable**; see TODO |
+| Kimi-VL A3B Instruct | Q3_K_S / Q4_K_S + Q8_0 mmproj | text, image | `deepseek2` | ❌ **garbage output** — whole `deepseek2` family broken on K3 (see below) |
+| DeepSeek-V2-Lite | Q4_K_M | text | `deepseek2` | ❌ **garbage output** — reproduces on stock upstream too (control for the above) |
 
 Modalities covered on the mmproj path: **text ✅ · image ✅ · audio ✅ · video ✅**. No mtmd
 modality is missing.
+
+> **`deepseek2` / MLA is broken on this board — and it is not our fork's doing.** Kimi-VL and
+> DeepSeek-V2-Lite both emit `GGGGGG…` on **this fork *and* a stock upstream b9628 build**.
+> Ruled out: the vision path (text-only fails the same), quantization (Q3_K_S and Q4_K_S both
+> fail), and IME2 (`-nr`/`--no-repack` still fails). The two models differ in MLA form, expert
+> gating and vocab, so it is the shared MLA path, not a model quirk. Note `deepseek2-ocr`
+> (DeepSeek-OCR-2, above) **works** — same family, separate arch enum, and the best lead for
+> isolating the bug. Leading unverified hypothesis: partial rope (deepseek2 rotates 64 of 192
+> head dims; every arch that works here uses full rope). Parked — details in [`TODO.md`](TODO.md).
+
+---
+
+## Benchmarks
+
+Per-model throughput lives in [`benchmarking/BENCHMARKS.md`](benchmarking/BENCHMARKS.md) — a
+three-way comparison of **Bianbu 4.0.1 (0.1.1)** vs **SpacemiT 0.1.3** vs **this fork**, `pp`
+and `tg`, FA on/off, across the Gemma 4 and Qwen3.5 families.
+
+Two things to take from it: base throughput is **identical within noise** across all three
+builds (the fork doesn't regress the A100 backend), and **MTP is the fork's differentiator** —
+it's the only build that runs Gemma 4 MTP at all, and it roughly doubles Qwen MTP over
+SpacemiT 0.1.3.
+
+| Model | Base tg/s | MTP tg/s | Speedup |
+|---|---|---|---|
+| `gemma-4-12B-qat` | 3.55 | 6.00 | **1.69×** |
+| `gemma-4-E4B-qat` | 7.81 | 12.00 | **1.54×** |
+| `gemma-4-12b` | 3.08 | 4.00 | 1.30× |
+| `Qwen3.5-4B-Q4_K_M` | 7.10 | 8.40 | 1.18× |
+| `gemma-4-E2B-qat` | 13.29 | 13.90 | 1.05× |
+| `Qwen3.5-2B-Q4_1` | 16.06 | 12.18 | 0.76× *(net loss — skip MTP)* |
+
+MTP wins biggest on the slower, larger models where accepted draft tokens save the most
+wall-clock; it is marginal-to-negative on small fast ones. `Qwen3.5-9B` + MTP OOMs at 16 GB.
 
 ---
 

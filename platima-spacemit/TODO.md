@@ -1380,11 +1380,84 @@ Both arches were already code-present in the 0.1.6 mtmd lineage; patch 29 makes 
   graph-internal, not disk weights, so they never hit the retype heuristic. Result: coherent
   audio transcription. `--version` stamp → patch 29.
 
-**Deferred (not in this patch):** EAGLE3 speculative decode (fork has only a disabled no-op
-stub; full 4-commit port pending a K3-fitting draft+target — e.g. AngelSlim `Qwen3-4B_eagle3`
-draft + a base Qwen3-4B target). Hy3 + Cohere2-MoE text arches are ported + build-green on
-branch `platima-mtmd-models-text` but **not K3-runnable** (Hy3 90 GB; no Cohere2 models exist)
-— kept off mainline.
+**Deferred (not in this patch):** EAGLE3 speculative decode — **un-deferred, see patch 30.**
+Hy3 + Cohere2-MoE text arches are ported + build-green on branch `platima-mtmd-models-text`
+but **not K3-runnable** (Hy3 90 GB; no Cohere2 models exist) — kept off mainline.
+
+## Patch 30 (DONE 2026-08-09) — EAGLE3 speculative decode: runs on K3, accept rate unresolved
+
+Un-defers the EAGLE3 item from patch 29. The 4-commit upstream core port landed earlier on
+`platima-mtmd-eagle3`; this patch makes it actually **load and run**, using AngelSlim
+`Qwen3-4B_eagle3` as draft against a base Qwen3-4B target.
+
+- **`examples/speculative-simple` segfault (fixed).** `cparams.ctx_other = ctx_tgt` and
+  `n_rs_seq = 0` were nested inside `if (spec_mtp)`, so `--spec-type draft-eagle3` never got
+  the target link. An EAGLE3 draft with no `tok_embd`/`output` of its own borrows the
+  target's (`src/models/eagle3.cpp:162-167`, `:297-300`), so `llama-context.cpp:114-120`
+  threw `ctx_other_required_error` → null context → **segfault**, because this branch (unlike
+  the MTP-on-target one) never null-checked. Same class as **patch 7**, which fixed it for
+  Gemma4-Assistant by moving the assignments *into* the mtp guard; patch 30 generalizes it —
+  `ctx_other`/`n_rs_seq` now apply to every spec type, matching
+  `tools/server/server-context.cpp`, which already set them unconditionally. Null check added.
+- **Torch-free converter** (`platima-spacemit/convert_eagle3_notorch.py`). The K3 is
+  riscv64 / Python 3.14 with **numpy only** — no torch, transformers, safetensors or
+  huggingface_hub wheels exist for it, so `convert_hf_to_gguf.py` cannot run on-device at
+  all. The script parses `model.safetensors` by hand (8-byte LE header length + JSON header;
+  BF16→f32 is `uint16 << 16`) and lifts the tokenizer wholesale out of an already-converted
+  **target** GGUF via `gguf.GGUFReader`, sidestepping AutoTokenizer. Mirrors
+  `conversion/llama.py`: `midlayer.*` → `blk.0.*`, `hidden_norm` → `attn_norm_2`, `t2d`
+  dropped, llama Q/K `undo_permute`.
+- **`d2t` must be absolute target ids.** Checkpoints store `d2t` as an *offset*; the graph
+  indexes target-vocab rows with it directly (`ggml_set_rows`, `eagle3.cpp:304-317`), so the
+  converter must write `d2t + arange` (and it must stay `GGML_TYPE_I64` — asserted at `:309`).
+  Written raw it gives **0%** accept, since every low draft id collapses onto row 0.
+
+**Status: runs end-to-end, but accept is only 0–1.4% — not usable yet.** The draft is *not*
+emitting garbage: for "The capital of France is" it proposes `' located' / ' Paris' /
+' London'`, so weights, `d2t` and permute are fundamentally right. But probabilities are
+near-uniform (0.109/0.109/0.107) and **identical at draft pos 0, 1 and 2** — the signature of
+the fused target hidden-state features not varying per position. Ruled out: Q/K permute
+(A/B'd both ways, no change) and target-variant mismatch (base Qwen3-4B vs an Instruct-AWQ
+GGUF — these are *different* checkpoints, and EAGLE3 drafts are checkpoint-specific).
+Remaining suspect is the target-side layer-input tap (`llama_set/get_embeddings_layer_inp`,
+`common/speculative.cpp:507,595`); resembles upstream issue #24541. **Next step:** verify the
+tapped features actually change per decode step.
+
+## PARKED (2026-08-09) — the whole `deepseek2` family is broken on K3, upstream included
+
+Investigating "does Kimi-VL work" turned into a much larger finding. **Kimi-VL-A3B produces
+garbage, and it is not a Kimi bug, not a fork bug, and not an IME2 bug.** Ruled out in order:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| vision / mmproj path | text-only run | fails identically (`GGGG…`) |
+| low-bit MoE collapse | Q3_K_S vs Q4_K_S | both fail (Q4 is *worse*) |
+| SpacemiT IME2 | `-nr` / `--no-repack` | still fails |
+| Kimi's exotic config | DeepSeek-V2-Lite Q4_K_M | fails identically |
+| **fork regression** | **stock llama.cpp b9628** | **fails identically** |
+
+Two unrelated deepseek2 models — different MLA forms (`attn_kv_b` combined vs `attn_k_b` /
+`attn_v_b` absorbed), different gating (softmax vs sigmoid), different vocabs (102400 vs
+163840), different publishers — both emit `GGGGGG` on **both** this fork and a stock upstream
+build. `src/models/deepseek2.cpp` is ~11 lines off `upstream/master` and both deltas are
+benign (`n_layer()`→`n_layer` API drift; an `effective_n_layers` MTP adaptation where
+`nextn_predict_layers` correctly defaults to 0). GGUF metadata and tensor shapes were verified
+correct against the loader for both files.
+
+Qwen3-4B, Qwen3.6-35B-A3B MoE and Gemma-4 all run fine here, so this is **not** general RVV
+breakage and **not** `mul_mat_id`. It is specific to the MLA path.
+
+- **Leading (unverified) hypothesis:** partial rope — deepseek2 rotates only 64 of 192 head
+  dims (`rope.dimension_count=64` vs `attention.key_length=192`), whereas every arch that
+  works here uses full rope.
+- `test-backend-ops` cannot help: it skips the CPU backend when CPU is the only device.
+- No torch on-box means we **cannot generate reference activations locally** — the main
+  reason this is open-ended rather than an afternoon's work.
+- **Cheapest next probe:** DeepSeek-OCR-2 (`deepseek2-ocr`) is validated *working* in Matrix
+  B — same family, separate arch enum. Diffing its graph builder against `deepseek2.cpp` is
+  pure code reading and should isolate the broken branch.
+
+Consequence: **Kimi-VL is not worth further model downloads** until the MLA path is fixed.
 
 ## K3 A100 / X100 improvements observed during the merge
 
