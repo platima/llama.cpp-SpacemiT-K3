@@ -107,11 +107,19 @@ int main(int argc, char ** argv) {
 
         auto cparams = common_context_params_to_llama(params_dft);
         if (spec_mtp) {
-            cparams.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
-            cparams.n_rs_seq  = 0;
-            cparams.ctx_other = ctx_tgt;
+            cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
         }
+
+        // An EAGLE3 draft without its own tok_embd/output borrows them from the target, so
+        // the link is required for any spec type, not just MTP (see server-context.cpp).
+        cparams.n_rs_seq  = 0;
+        cparams.ctx_other = ctx_tgt;
+
         ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
+        if (ctx_dft == nullptr) {
+            LOG_ERR("%s", "failed to create draft context\n");
+            return 1;
+        }
 
         params.speculative.draft.ctx_tgt = ctx_tgt;
         params.speculative.draft.ctx_dft = ctx_dft.get();
