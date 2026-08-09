@@ -1423,6 +1423,53 @@ Remaining suspect is the target-side layer-input tap (`llama_set/get_embeddings_
 `common/speculative.cpp:507,595`); resembles upstream issue #24541. **Next step:** verify the
 tapped features actually change per decode step.
 
+## Patch 31 (DONE 2026-08-09) — SpacemiT 0.1.7 backend: q4_0 decode fast path, +35.6% tg
+
+Cherry-picks **only** the `ggml/src/ggml-cpu/spacemit/` portion of SpacemiT release 0.1.7
+(commits `5a23f07a4` #25 and `6ad6d85f1` #27). The rest of those commits is the ONNX media /
+`smt-mtmd` / Qwen3-TTS wrapper path, which we do not build (no ORT SDK, no `.onnx` encoders),
+so taking whole commits would drag in a large untested surface for zero benefit.
+
+**This corrects an earlier assumption.** MODELS.md previously implied the newer spacemit
+commits were ONNX-only and had "no effect on the A100/X100 mmproj path". That is true of
+`#19`/`#20`/`#21`, but **not** of 0.1.7:
+
+- `ime.cpp`: a **`gemm_m == 1` fast path** — i.e. *decode* — for `q4_0` (INTER_SIZE 256,
+  NB_COLS 32) and `q8_0` (INTER_SIZE 32, NB_COLS 32). It skips the staged copy and streams
+  wide Q8 output heads directly through TCM. Also removes the old even/odd pair-barrier
+  lockstep in favour of a simpler `active0` bound (this part affects *all* block types).
+- `rvv_kernels.cpp`: new RVV `GELU`, `TANH` and `GEGLU` f32 kernels, wired into `supports_op`
+  / `get_tensor_traits` as `GGML_OP_UNARY` / `GGML_OP_GLU`.
+
+Applied with `git apply -3`; **no conflicts**. Our local backend patches were verified intact
+afterwards: patch 20's `GGML_OP_CONT` bypass (note v0.1.6 already had *two* `case
+GGML_OP_CONT:` — the live one in `compute_forward` is a dead path since traits are never
+attached; patch 20 disabled the one in `get_tensor_traits`), the patch 14
+`GGML_SPACEMIT_DISPATCH_LOG` / `SUPPORTS_LOG` hooks, and patch 28's
+`max_perfer_threads` clamp.
+
+**Measured, same-session A/B** (`llama-bench -t 8 -p 128 -n 128 -mmp 0 -fa 1 -ub 128 -r 3`,
+stash → rebuild → measure → restore → rebuild → measure, so no cross-session drift):
+
+| Model | Build | pp128 | tg128 |
+|---|---|---|---|
+| `gemma-4-E2B_q4_0-it` | 0.1.6 | 116.39 ± 0.13 | 11.42 ± 0.03 |
+| `gemma-4-E2B_q4_0-it` | **0.1.7** | **136.55 ± 0.12** | **15.49 ± 0.02** |
+| `Qwen3-4B-Q4_K_M` | 0.1.6 | 57.63 ± 0.03 | 9.20 ± 0.02 |
+| `Qwen3-4B-Q4_K_M` | **0.1.7** | 57.58 ± 0.04 | 9.20 ± 0.03 |
+
+**q4_0: +35.6% tg, +17.3% pp.** q4_K: unchanged within noise, as expected — the fast path is
+`if constexpr`-gated to q4_0/q8_0, and the barrier rework is neutral. Both deltas are far
+outside the ±0.03 run variance.
+
+This is notable because it is a **decode** win: patch 17 established that the IME2 HP 32×256
+tile gives ~+12% prefill but 0% decode (M=1 is bandwidth-bound), which is exactly what this
+`gemm_m == 1` path attacks. Correctness spot-checked on both quants (coherent gemma-4-E2B and
+Qwen3-4B generations, `--temp 0`).
+
+**Not taken:** `c9af964b5` (#28) is CI/ORT-version only. The Qwen3-TTS runtime, `server-tts`,
+`smt-mtmd/` wrappers and the ONNX media refactor remain unbuilt.
+
 ## PARKED (2026-08-09) — the whole `deepseek2` family is broken on K3, upstream included
 
 Investigating "does Kimi-VL work" turned into a much larger finding. **Kimi-VL-A3B produces

@@ -88,7 +88,8 @@ so it is entirely **untested by us**. SpacemiT's #19 (Gemma4-audio), #20 (Qwen3-
 > ONNX-only: `#25` (mtmd media refactor) adds a `gemm_m == 1` — i.e. **decode** — fast path in
 > `ggml-cpu/spacemit/ime.cpp` for q4_0/q8_0 that streams directly through TCM, plus new RVV
 > `GELU`/`TANH`/`GEGLU` kernels in `rvv_kernels.cpp`; `#27` (Qwen3-TTS) also touches `ime.cpp`.
-> Those are real A100-path changes and are worth cherry-picking.
+> Those are real A100-path changes — **taken in patch 31** (backend files only), worth
+> **+35.6% decode** on q4_0 models. The ONNX wrappers themselves remain unbuilt.
 
 ---
 
