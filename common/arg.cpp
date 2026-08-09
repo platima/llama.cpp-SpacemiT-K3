@@ -1091,7 +1091,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             fprintf(stderr, "version: %d (%s)\n", llama_build_number(), llama_commit());
             fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
             // Bump PLATIMA_FORK_PATCH when adding a patch; full history in platima-spacemit/TODO.md
-            static const int PLATIMA_FORK_PATCH = 31;
+            static const int PLATIMA_FORK_PATCH = 32;
             fprintf(stderr, "Platima SpacemiT-K3 fork (platima-mtmd) — patch %d\n", PLATIMA_FORK_PATCH);
             fprintf(stderr, "SpacemiT base: 0.1.6  upstream base: 354ebac8c\n");
             fprintf(stderr, "Full changelog: platima-spacemit/TODO.md\n");

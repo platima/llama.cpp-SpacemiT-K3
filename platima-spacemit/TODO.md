@@ -1470,6 +1470,40 @@ Qwen3-4B generations, `--temp 0`).
 **Not taken:** `c9af964b5` (#28) is CI/ORT-version only. The Qwen3-TTS runtime, `server-tts`,
 `smt-mtmd/` wrappers and the ONNX media refactor remain unbuilt.
 
+## Patch 32 (DONE 2026-08-10) — spacemit `#30` q4_0 HP scale-overflow fix + remote branch move
+
+**SpacemiT moved their active branch.** `spacemit/spacemit-mtmd` (the old default, still
+`spacemit/HEAD`) is stale at `1a320dd04` / 2026-07-20; development continues on
+**`spacemit/mtmd-backend`**, tip `27acf9db6` / 2026-08-05 — *newer than the `v0.1.7` tag*
+(`c9af964b5`, 2026-07-31). Patch 31 was audited against the **tag only**, so this commit was
+missed. **When syncing the backend in future, diff against `spacemit/mtmd-backend`, not
+`spacemit-mtmd` and not the newest tag.**
+
+Full re-audit of every commit touching `ggml/src/ggml-cpu/spacemit/` or `tools/smt-mtmd/`:
+
+| Commit | What | Status |
+|---|---|---|
+| `5a23f07a4` | #25 mtmd media refactor (decode fast path + RVV GELU/GEGLU) | taken, patch 31 |
+| `6ad6d85f1` | #27 Qwen3-TTS (also touches `ime.cpp`) | backend hunks taken, patch 31 |
+| `c9af964b5` | #28 CI / ORT version bump | skipped — CI only |
+| `27acf9db6` | #30 q4_0 HP scale overflow | **taken, this patch** |
+
+**The fix matters specifically because of patch 31.** `quantize_a_row_i8_hp` /
+`quantize_a_4row_i8_hp` / `quantize_a_nrow_i8_hp_ref` stored the block scale as `_Float16`
+while computing `scale_factor = 1.0f / scale_avg`. For small `scale_avg` that reciprocal blows
+past fp16 range, corrupting the activation quantization. The fix rescales both sides by a
+`stable_factor = 0.1f` (`stable_factor / scale_avg` stored against `scale_avg / stable_factor`)
+so the final product is unchanged but fp16 range pressure drops; it also adds the
+`scale_avg ? … : 0.0f` zero-guard to the `_ref` variant that the other two already had.
+Reported upstream against qwen2.5-3b q4_0. Patch 31 routes *more* q4_0 decode traffic through
+exactly this HP quantization, so shipping 31 without 30 would have raised the odds of hitting it.
+
+Cherry-picked with `-x` (clean, original authorship preserved). Re-measured — **the fix is
+free**: `gemma-4-E2B_q4_0` pp 136.24 ± 0.21 / tg **15.51 ± 0.06**, versus 136.55 ± 0.12 /
+15.49 ± 0.02 for patch 31 alone, i.e. identical within noise. Output coherence re-checked at
+`--temp 0`. We have no qwen2.5-3b q4_0 locally, so the overflow itself was not reproduced —
+taken on the strength of the upstream report and the code reading.
+
 ## PARKED (2026-08-09) — the whole `deepseek2` family is broken on K3, upstream included
 
 Investigating "does Kimi-VL work" turned into a much larger finding. **Kimi-VL-A3B produces
