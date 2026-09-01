@@ -1423,7 +1423,11 @@ Remaining suspect is the target-side layer-input tap (`llama_set/get_embeddings_
 `common/speculative.cpp:507,595`); resembles upstream issue #24541. **Next step:** verify the
 tapped features actually change per decode step.
 
-## Patch 31 (DONE 2026-08-09) — SpacemiT 0.1.7 backend: q4_0 decode fast path, +35.6% tg
+## Patch 31 (DONE 2026-08-09) — SpacemiT 0.1.7 backend: q4_0 decode fast path, +40.8% tg
+
+> **Figures below were measured with patch 32 (`#30`) applied and are superseded.** After
+> patch 33 reverted `#30`, the true patch-31 gain is **pp 116.39 → 136.80 (+17.5%), tg
+> 11.42 → 16.08 (+40.8%)**. See patch 33.
 
 Cherry-picks **only** the `ggml/src/ggml-cpu/spacemit/` portion of SpacemiT release 0.1.7
 (commits `5a23f07a4` #25 and `6ad6d85f1` #27). The rest of those commits is the ONNX media /
@@ -1503,6 +1507,55 @@ free**: `gemma-4-E2B_q4_0` pp 136.24 ± 0.21 / tg **15.51 ± 0.06**, versus 136.
 15.49 ± 0.02 for patch 31 alone, i.e. identical within noise. Output coherence re-checked at
 `--temp 0`. We have no qwen2.5-3b q4_0 locally, so the overflow itself was not reproduced —
 taken on the strength of the upstream report and the code reading.
+
+## Patch 33 (DONE 2026-08-10) — REVERT patch 32 (`#30`): it destroyed MTP accept (64% → 0%)
+
+Patch 32 cherry-picked spacemit `#30` (q4_0 HP scale rescale) and was "validated" with
+`llama-bench` throughput plus a fluency spot-check. Both passed. **Both were the wrong tests.**
+It silently zeroed speculative decoding, found only when the user reported `llama-server` MTP
+getting 0 accepted on gemma-4-12B-qat.
+
+Bisect by `git checkout <commit> -- ggml/src/ggml-cpu/spacemit/` + rebuild, same models/flags,
+idle box, `--temp 0`:
+
+| Backend | MTP accept | n_drafted | tg (12B MTP) |
+|---|---|---|---|
+| patch 30 (pre-31) | 70.6% | 68 | 8.89 t/s |
+| **patch 31 only** | **64.5%** | 76 | **9.12 t/s** |
+| patch 31 + 32 | **0.000%** | 260 | — |
+
+**Patch 31's decode fast path is not at fault — `#30` is.** `#30` stores the per-subblock scale
+as `scale_temp[kk] * 0.1f/scale_avg` and the block scale as `scale_avg / 0.1f`, so the product
+is algebraically preserved, and the int8 data is untouched (it quantizes with
+`rep_scale_a = 1/scale_temp[kk]`). But `a_sum_ptr[kk] = (-a_sum) * 8.0f` — the q4_0 zero-point
+correction, which carries scale semantics — is **not** rescaled. If that term is applied at a
+different level than the sub-scale, the 10× block-scale shift mis-weights it. *(Mechanism is a
+code-reading hypothesis; the measured 64.5% → 0% is what drives the revert.)*
+
+Reverted. The overflow `#30` fixes is real but was reported against **qwen2.5-3b q4_0**, which
+we do not have and have never seen fail here; MTP on gemma-4 is something we actually run. If
+the overflow ever appears on this hardware, revisit with a smaller `stable_factor` **and** a
+matching rescale of the `a_sum` term — and re-measure accept, not just t/s.
+
+Bonus: `#30` was also costing throughput. With it reverted, `gemma-4-E2B_q4_0` measures
+**pp 136.80 ± 0.07 / tg 16.08 ± 0.02**, versus 136.24 / 15.51 with it and 116.39 / 11.42 at the
+patch-30 baseline. **Patch 31's true gain is +17.5% pp and +40.8% tg**, not the +35.6% recorded
+in patch 31 (that figure was measured with `#30` already applied and is now corrected).
+
+**Process lesson (the important part):** throughput benchmarks and coherent-looking output
+cannot detect numerical drift in a compute kernel — fluent text survives small errors intact.
+Speculative decoding is the sensitive detector, because the draft's argmax must match the
+target's *exactly*; drift collapses accept to 0. It is sharpest when draft and target use
+different quant types (here Q4_0 MTP head vs Q4_K_XL target), since changing one quant's kernel
+desynchronises them while each still looks fine alone. **Any future
+`ggml/src/ggml-cpu/spacemit/` change must be validated with an MTP accept run**, e.g.
+`llama-speculative-simple -m <target> -md <mtp-head> --spec-type draft-mtp --spec-draft-n-max 4
+-t 8 --no-mmap -fa 1 -c 4096 --temp 0 -n 64`. A rising `n_drafted` is the early warning.
+
+**Open follow-up:** patch 30 measured 70.6% and patch 31 measured 64.5%. That is a single
+`-n 64` run each, and per the variance discipline in [`README.md`](README.md) a short run is
+**not** enough to call a ~6 pp MTP delta noise. Re-measure `-n 500 × 3` before concluding
+patch 31's fast path is accept-neutral.
 
 ## PARKED (2026-08-09) — the whole `deepseek2` family is broken on K3, upstream included
 

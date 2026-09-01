@@ -1740,7 +1740,6 @@ template <size_t MB_ROWS>
 void quantize_a_nrow_i8_hp_ref(size_t blk_len, const float * a_ptr, size_t count_k, uint8_t * quant_a_ptr) {
     constexpr size_t k_subblk_len = 32;
     const size_t     subblk_count = blk_len / k_subblk_len;
-    const float      stable_factor = 0.1f;
 
     GGML_ASSERT(blk_len == 256);
 
@@ -1765,11 +1764,11 @@ void quantize_a_nrow_i8_hp_ref(size_t blk_len, const float * a_ptr, size_t count
         }
 
         scale_avg /= subblk_count;
-        float scale_factor = scale_avg ? stable_factor / scale_avg : 0.0f;
+        float scale_factor = 1.0f / scale_avg;
 
         _Float16 * scale_avg_ptr =
             reinterpret_cast<_Float16 *>(quant_a_ptr + a_nrow_block_stride - sizeof(_Float16) * MB_ROWS);
-        scale_avg_ptr[0] = static_cast<_Float16>(scale_avg / stable_factor);
+        scale_avg_ptr[0] = scale_avg;
 
         for (size_t kk = 0; kk < subblk_count; kk++) {
             uint8_t *  a_subblk_base = quant_a_ptr + kk * a_subblk_stride;
@@ -1996,7 +1995,6 @@ void quantize_a_row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, u
     int64_t          a_subblk_stride          = q8_hp_blk_size(k_subblk_len, false, false);
     size_t           vlenb                    = __riscv_vlenb();
     float            scale_temp[subblk_count] = { 0.0f };
-    const float      stable_factor            = 0.1f;
 
     if (vlenb == 128) {
         for (size_t k = 0; k < count_k; k += blk_len, quant_a_ptr += a_blk_stride) {
@@ -2020,8 +2018,8 @@ void quantize_a_row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, u
             }
 
             scale_avg /= subblk_count;
-            const float scale_factor = scale_avg ? stable_factor / scale_avg : 0.0f;
-            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg / stable_factor);
+            const float scale_factor = scale_avg ? 1.0f / scale_avg : 0.0f;
+            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg);
 
             for (size_t kk = 0; kk < subblk_count; ++kk) {
                 uint8_t *     a_subblk_base = quant_a_ptr + kk * a_subblk_stride;
@@ -2068,8 +2066,8 @@ void quantize_a_row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, u
             }
 
             scale_avg /= subblk_count;
-            const float scale_factor = scale_avg ? stable_factor / scale_avg : 0.0f;
-            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg / stable_factor);
+            const float scale_factor = scale_avg ? 1.0f / scale_avg : 0.0f;
+            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg);
 
             for (size_t kk = 0; kk < subblk_count; ++kk) {
                 uint8_t *     a_subblk_base = quant_a_ptr + kk * a_subblk_stride;
@@ -2109,7 +2107,6 @@ void quantize_a_4row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, 
     int64_t          a_subblk_stride          = q8_hp_blk_size(k_subblk_len, false, false) * 4;
     size_t           vlenb                    = __riscv_vlenb();
     float            scale_temp[subblk_count] = { 0.0f };
-    const float      stable_factor            = 0.1f;
 
     if (vlenb == 128) {
         for (size_t k = 0; k < count_k; k += blk_len, quant_a_ptr += a_nrow_block_stride) {
@@ -2147,8 +2144,8 @@ void quantize_a_4row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, 
             }
 
             scale_avg /= subblk_count;
-            const float scale_factor = scale_avg ? stable_factor / scale_avg : 0.0f;
-            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg / stable_factor);
+            const float scale_factor = scale_avg ? 1.0f / scale_avg : 0.0f;
+            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg);
 
             for (size_t kk = 0; kk < subblk_count; ++kk) {
                 uint8_t *     a_subblk_base = quant_a_ptr + kk * a_subblk_stride;
@@ -2242,8 +2239,8 @@ void quantize_a_4row_i8_hp(size_t blk_len, const float * a_ptr, size_t count_k, 
             }
 
             scale_avg /= subblk_count;
-            const float scale_factor = scale_avg ? stable_factor / scale_avg : 0.0f;
-            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg / stable_factor);
+            const float scale_factor = scale_avg ? 1.0f / scale_avg : 0.0f;
+            scale_avg_ptr[0]         = static_cast<_Float16>(scale_avg);
 
             for (size_t kk = 0; kk < subblk_count; ++kk) {
                 uint8_t *     a_subblk_base = quant_a_ptr + kk * a_subblk_stride;
