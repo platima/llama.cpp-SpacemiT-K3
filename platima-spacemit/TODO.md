@@ -2,6 +2,27 @@
 
 Tracking items deferred from the Gemma4 MTP cherry-pick work.
 
+## Open items / regression watch (updated 2026-08-10)
+
+Goal for this fork: **strictly more compatible and faster than stock, with no regressions.**
+Anything below is a live gap against that bar. Ordered by how much it violates it.
+
+| # | Item | Status | Next action |
+|---|---|---|---|
+| 1 | **qwen2.5-3b q4_0 HP overflow** | ⚠️ **compatibility gap we knowingly re-opened** — patch 33 reverted spacemit `#30` because it zeroed MTP accept. The overflow `#30` fixed is presumably still present in our tree. | Get a `qwen2.5-3b q4_0` GGUF and reproduce. Then write the *correct* fix: rescale the HP sub-block/block scales **and** the `a_sum` zero-point term together, so overflow headroom is gained without breaking accept. Verify with both an overflow repro and an MTP accept run. |
+| 2 | **`deepseek2` / MLA family broken** | ❌ garbage output (Kimi-VL, DeepSeek-V2-Lite). **Also broken on stock upstream b9628**, so not a fork regression — but it *is* a compatibility gap. | Diff `deepseek2-ocr` (works) against `deepseek2.cpp` (broken) — same family, separate arch enum, pure code reading. Leading hypothesis: partial rope (64 of 192 head dims). See PARKED section. |
+| 3 | **EAGLE3 accept 0–1.4%** | ⚠️ loads and runs (patch 30) but useless. Draft proposes plausible tokens with near-uniform probs, identical at pos 0/1/2. | Verify the target-side layer-input tap (`llama_set/get_embeddings_layer_inp`, `common/speculative.cpp:507,595`) actually varies per decode step. Resembles upstream #24541. |
+| 4 | **Patch 31 accept-neutrality unproven** | ⚠️ patch 30 measured 70.6%, patch 31 64.5% — one `-n 64` run each. Our own variance discipline says that is too short to call a ~6 pp MTP delta noise. | Re-measure `-n 500 × 3` on gemma-4-12B-qat MTP. If the drop is real, the `gemm_m == 1` fast path is not bit-exact and should be gated or made opt-in. |
+| 5 | **`-ctkd`/`-ctvd` silently ignored** | ⚠️ minor correctness/UX bug found while debugging MTP. When `--model-draft` loads a separate draft model, the draft context is built from `params_dft` (inherited from the main context), so `--spec-draft-type-k/v` are dropped and the draft silently inherits the main `-ctk/-ctv`. | Mirror the `mtp_on_target` branch: set `cparams.type_k/type_v` from `params.speculative.draft.cache_type_k/v` in the separate-draft path (`server-context.cpp` ~1066, `speculative-simple.cpp` ~108). |
+| 6 | **Kimi-VL unusable** | ❌ blocked by item 2 (its vision projector is fine; the `deepseek2` backbone is not). | Nothing to do until item 2 is fixed. Do not download more Kimi quants. |
+| 7 | **Hy3 / Cohere2-MoE** | ⚪ ported + build-green, never run | Hy3 is 90 GB and no Cohere2-MoE GGUF exists. Kept off mainline; revisit if a K3-sized GGUF appears. |
+| 8 | **mtmd upstream bugfix sync** | ⚪ deferred | Only cherry-pick fixes whose bug is *confirmed present* in our 3-way-diverged `tools/mtmd/`; the batching refactor was dropped as poor ROI. |
+
+**Standing validation rule (from patch 33):** any change under
+`ggml/src/ggml-cpu/spacemit/` must be checked with an MTP accept run, not just `llama-bench`
+throughput and a fluency eyeball. Fluent text hides numerical drift; speculative accept does
+not. See patch 33 for the command and the healthy reference figures.
+
 ## Patch history on branch `platima-mtmd` (on top of SpacemiT release 0.1.6 / upstream base `354ebac8c`)
 
 - **patch 1**: Cherry-pick of Gemma4 MTP (#23398) and Gemma4 E2B/E4B assistants

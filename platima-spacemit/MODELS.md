@@ -116,6 +116,7 @@ smoke (loads + coherent output), not a benchmark unless noted.
 | Qwen3-4B + AngelSlim EAGLE3 | Q4_K_M + f16 draft | text + EAGLE3 | `qwen3` / `eagle3` | ⚠️ loads & runs (patch 30) but **0–1.4% accept — not usable**; see TODO |
 | Kimi-VL A3B Instruct | Q3_K_S / Q4_K_S + Q8_0 mmproj | text, image | `deepseek2` | ❌ **garbage output** — whole `deepseek2` family broken on K3 (see below) |
 | DeepSeek-V2-Lite | Q4_K_M | text | `deepseek2` | ❌ **garbage output** — reproduces on stock upstream too (control for the above) |
+| Qwen2.5 3B | Q4_0 | text | `qwen2` | ⚪ **untested, wanted** — spacemit `#30` reports a q4_0 HP fp16 scale overflow on this model. We reverted `#30` (patch 33, it zeroed MTP accept), so if the overflow is real we are exposed. Needed to validate a correct fix. |
 
 Modalities covered on the mmproj path: **text ✅ · image ✅ · audio ✅ · video ✅**. No mtmd
 modality is missing.

@@ -281,6 +281,24 @@ branches remain on origin for reference).
 - **Heap-fallback barrier is not crash-safe (`ime.cpp:1747: wait tcm buffer failed`).** When `/dev/tcm_sync_mem` is absent, the backend falls back to a shared-memory barrier at `/dev/shm/tcm_sync_standalone`. If a spacemit process aborts (or is killed) mid-barrier, it leaves that file in a wedged state, and **every subsequent run then aborts** at `ime.cpp:1747` across all 8 A100 cores — regardless of model size (a 0.8B model that ran fine will start crashing too). Larger graphs (e.g. 9B text models) appear more likely to trip the initial failure, especially under sustained back-to-back loads. Recovery: clear the stale file with `sudo rm /dev/shm/tcm_sync_standalone` (it is root-owned in a sticky dir, so a non-root user cannot remove it) or reboot. This is pre-existing backend behaviour, unrelated to the vision tiers, but worth knowing before a long benchmark batch.
 - `version: 9481 (161be67d6)` (the upstream-style stamp) reports the local cherry-pick tip, not an upstream commit. The fork-specific `--version` lines print the upstream base (`354ebac8c`) separately to disambiguate.
 
+## Outstanding validation
+
+The bar for this fork is **more compatible and faster than stock, with no regressions**. These
+are the current gaps against it — full detail and next actions in
+[`TODO.md`](TODO.md) ("Open items / regression watch"):
+
+| Item | State |
+|---|---|
+| **qwen2.5-3b q4_0 HP overflow** | Knowingly re-opened. Patch 33 reverted spacemit `#30` because it zeroed MTP accept, so the overflow it fixed is presumably back. Needs a proper fix that also rescales the `a_sum` term — untested here, we have no such GGUF. |
+| **`deepseek2` / MLA garbage output** | Kimi-VL and DeepSeek-V2-Lite both broken — **also on stock upstream**, so not our regression, but still a compatibility gap. |
+| **EAGLE3 accept 0–1.4%** | Loads and runs, not usable. Suspect the target-side layer-input tap. |
+| **Patch 31 accept-neutrality** | 70.6% → 64.5% on single short runs; needs `-n 500 × 3` to confirm the fast path is accept-neutral. |
+| **`-ctkd`/`-ctvd` ignored** | With a separate `--model-draft`, the draft context inherits the main `-ctk/-ctv` and the draft-specific flags are dropped. |
+
+**Standing rule:** any change under `ggml/src/ggml-cpu/spacemit/` must be validated with an MTP
+accept run, not just `llama-bench` throughput plus coherent-looking output. Patch 33 documents
+why — fluent text hides numerical drift that collapses speculative accept to zero.
+
 ## Relationship to upstream
 
 `master` tracks `ggml-org/llama.cpp:master`; `platima-mtmd` carries the SpacemiT base plus the patches above. Pulling in newer upstream changes is a separate workflow (see "Rebase onto a personal fork" in `TODO.md`) and not done routinely.
